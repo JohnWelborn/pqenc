@@ -1,0 +1,15 @@
+[project]
+name = "newage-claude"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=46.0.3",
+    "liboqs-python>=0.14.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+]
