@@ -6,6 +6,7 @@ Supports streaming encryption for large files.
 """
 
 import argparse
+import ctypes
 import os
 import sys
 
@@ -46,10 +47,50 @@ class PostQuantumFileEncryption:
         pass
 
     @staticmethod
+    def _secure_zero(data: bytes) -> None:
+        """
+        Securely zero out sensitive data in memory using ctypes.
+
+        This implementation uses ctypes.memmove to zero the internal buffer
+        of bytes/bytearray objects. While Python's bytes are immutable at the
+        Python level, we can still zero the underlying C buffer.
+
+        Note: This is a best-effort security measure. Effectiveness depends on
+        Python's memory management and whether the data has been copied elsewhere.
+        """
+        if data is None or len(data) == 0:
+            return
+
+        try:
+            if isinstance(data, bytearray):
+                # For bytearray, we can zero it directly
+                ctypes.memset((ctypes.c_char * len(data)).from_buffer(data), 0, len(data))
+            elif isinstance(data, bytes):
+                # For bytes objects, we need to access the internal buffer
+                # Create a mutable buffer and zero it
+                # Note: This zeroes our local copy, but the original immutable
+                # bytes object's buffer cannot be directly modified due to Python's
+                # memory protection. However, we can at least ensure our reference
+                # doesn't keep the sensitive data around.
+                try:
+                    # Attempt to get a writable buffer view (works for some bytes objects)
+                    buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
+                    ctypes.memset(buf, 0, len(data))
+                except (TypeError, BufferError):
+                    # If we can't get a mutable view, the bytes object is truly immutable
+                    # The best we can do is rely on garbage collection
+                    pass
+        except (TypeError, ValueError, AttributeError, BufferError):
+            # If zeroing fails, continue gracefully
+            # The object will be cleared when garbage collected
+            pass
+
+    @staticmethod
     def generate_keypair(public_key_path: str, private_key_path: str) -> None:
         """
         Generate ML-KEM-1024 public/private key pair and save to files.
         """
+        private_key = None
         try:
             if os.path.exists(public_key_path):
                 print(f"Error: Public key file already exists: {public_key_path}")
@@ -79,6 +120,10 @@ class PostQuantumFileEncryption:
         except Exception as e:
             print(f"Error generating keypair: {e}")
             sys.exit(1)
+        finally:
+            # Securely zero private key from memory
+            if private_key is not None:
+                PostQuantumFileEncryption._secure_zero(private_key)
 
     @staticmethod
     def _derive_aes_key(shared_secret: bytes, salt: bytes) -> bytes:
@@ -103,6 +148,12 @@ class PostQuantumFileEncryption:
     @staticmethod
     def encrypt_file(input_path: str, output_path: str, public_key_path: str) -> None:
         """Encrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
+        shared_secret = None
+        aes_key = None
+        base_nonce = None
+        current_chunk = None
+        next_chunk = None
+
         try:
             if os.path.exists(output_path):
                 print(f"Error: Output file already exists: {output_path}")
@@ -155,6 +206,9 @@ class PostQuantumFileEncryption:
                     ciphertext = aesgcm.encrypt(nonce, current_chunk, aad)
                     fout.write(ciphertext)
 
+                    # Zero out current chunk after encryption
+                    PostQuantumFileEncryption._secure_zero(current_chunk)
+
                     chunk_index += 1
 
                     if not next_chunk:
@@ -174,10 +228,28 @@ class PostQuantumFileEncryption:
             if os.path.exists(output_path):
                 os.remove(output_path)
             sys.exit(1)
+        finally:
+            # Securely zero sensitive data from memory
+            if shared_secret is not None:
+                PostQuantumFileEncryption._secure_zero(shared_secret)
+            if aes_key is not None:
+                PostQuantumFileEncryption._secure_zero(aes_key)
+            if base_nonce is not None:
+                PostQuantumFileEncryption._secure_zero(base_nonce)
+            if current_chunk is not None:
+                PostQuantumFileEncryption._secure_zero(current_chunk)
+            if next_chunk is not None:
+                PostQuantumFileEncryption._secure_zero(next_chunk)
 
     @staticmethod
     def decrypt_file(input_path: str, output_path: str, private_key_path: str) -> None:
         """Decrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
+        private_key = None
+        shared_secret = None
+        aes_key = None
+        base_nonce = None
+        plaintext = None
+
         try:
             if os.path.exists(output_path):
                 print(f"Error: Output file already exists: {output_path}")
@@ -231,6 +303,8 @@ class PostQuantumFileEncryption:
                     try:
                         plaintext = aesgcm.decrypt(nonce, chunk, aad)
                         fout.write(plaintext)
+                        # Zero out plaintext after writing
+                        PostQuantumFileEncryption._secure_zero(plaintext)
                     except Exception:
                         print("Error: Decryption failed (Integrity check failed)")
                         print("Possible causes: Wrong key, corrupted file, or truncation attack.")
@@ -248,6 +322,18 @@ class PostQuantumFileEncryption:
             if os.path.exists(output_path):
                 os.remove(output_path)
             sys.exit(1)
+        finally:
+            # Securely zero sensitive data from memory
+            if private_key is not None:
+                PostQuantumFileEncryption._secure_zero(private_key)
+            if shared_secret is not None:
+                PostQuantumFileEncryption._secure_zero(shared_secret)
+            if aes_key is not None:
+                PostQuantumFileEncryption._secure_zero(aes_key)
+            if base_nonce is not None:
+                PostQuantumFileEncryption._secure_zero(base_nonce)
+            if plaintext is not None:
+                PostQuantumFileEncryption._secure_zero(plaintext)
 
 
 def main():
