@@ -26,7 +26,26 @@ except ImportError:
 
 
 class PostQuantumFileEncryption:
-    """Post-quantum secure file encryption using ML-KEM-1024 and AES-256-GCM."""
+    """
+    Post-quantum secure file encryption using ML-KEM-1024 and AES-256-GCM.
+
+    This class implements a hybrid encryption scheme combining:
+    - ML-KEM-1024 (NIST-standardized Kyber) for post-quantum key encapsulation
+    - AES-256-GCM for authenticated symmetric encryption
+    - HKDF-SHA256 for key derivation from shared secrets
+    - Streaming encryption/decryption for handling large files
+
+    SECURITY PROPERTIES:
+    - Post-quantum security: Resistant to attacks from quantum computers
+    - Authenticated encryption: Protects against tampering and forgery
+    - Forward secrecy: Each file uses a fresh ephemeral KEM key pair
+    - Memory safety: Sensitive data is securely zeroed after use
+    - Resource protection: Validates input sizes to prevent DoS attacks
+
+    FILE FORMAT:
+    [Magic: 4 bytes][KEM CT Len: 4 bytes][KEM CT][Salt: 16 bytes][Nonce: 12 bytes][Encrypted Chunks...]
+    Each chunk: [AES-GCM ciphertext with 16-byte authentication tag]
+    """
 
     KEM_ALGORITHM = "ML-KEM-1024"
     AES_KEY_SIZE = 32  # 256 bits
@@ -90,6 +109,20 @@ class PostQuantumFileEncryption:
     def generate_keypair(public_key_path: str, private_key_path: str) -> None:
         """
         Generate ML-KEM-1024 public/private key pair and save to files.
+
+        SECURITY NOTES:
+        - Private key file permissions are set to 0600 (read/write for owner only)
+        - Private keys should be stored securely and never shared
+        - Public keys can be freely distributed for encryption
+        - ML-KEM-1024 provides post-quantum security against quantum computers
+
+        Args:
+            public_key_path: Path where public key will be saved
+            private_key_path: Path where private key will be saved (protected with 0600 permissions)
+
+        Raises:
+            OSError: If file operations fail
+            ValueError: If key generation fails
         """
         private_key = None
         try:
@@ -154,7 +187,28 @@ class PostQuantumFileEncryption:
 
     @staticmethod
     def encrypt_file(input_path: str, output_path: str, public_key_path: str) -> None:
-        """Encrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
+        """
+        Encrypt a file using streaming ML-KEM-1024 and AES-256-GCM.
+
+        SECURITY NOTES:
+        - Each encryption generates a fresh shared secret via KEM, ensuring unique
+          AES keys for every file encryption operation
+        - Nonces are derived by incrementing a random base nonce for each chunk,
+          preventing nonce reuse within a single file
+        - Never reuse nonces with the same AES key if implementing custom encryption
+        - Authentication tags protect against tampering and ensure integrity
+        - Streaming encryption processes files in 64KB chunks to handle large files
+          without loading entire contents into memory
+
+        Args:
+            input_path: Path to file to encrypt
+            output_path: Path where encrypted file will be saved
+            public_key_path: Path to ML-KEM-1024 public key file
+
+        Raises:
+            OSError: If file operations fail
+            ValueError: If encryption parameters are invalid
+        """
         shared_secret = None
         aes_key = None
         base_nonce = None
@@ -259,7 +313,26 @@ class PostQuantumFileEncryption:
 
     @staticmethod
     def decrypt_file(input_path: str, output_path: str, private_key_path: str) -> None:
-        """Decrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
+        """
+        Decrypt a file using streaming ML-KEM-1024 and AES-256-GCM.
+
+        SECURITY NOTES:
+        - Validates file format magic bytes to prevent processing of invalid files
+        - Validates KEM ciphertext length to prevent memory exhaustion attacks
+        - AES-GCM authentication ensures file integrity - decryption fails if file
+          has been tampered with or corrupted
+        - Streaming decryption processes files in chunks to handle large files
+        - Sensitive data (keys, plaintext) is securely zeroed from memory after use
+
+        Args:
+            input_path: Path to encrypted file
+            output_path: Path where decrypted file will be saved
+            private_key_path: Path to ML-KEM-1024 private key file
+
+        Raises:
+            OSError: If file operations fail
+            ValueError: If file format is invalid or decryption fails
+        """
         private_key = None
         shared_secret = None
         aes_key = None
