@@ -34,6 +34,7 @@ class PostQuantumFileEncryption:
     SALT_SIZE = 16
     CHUNK_SIZE = 64 * 1024  # 64KB chunks
     TAG_SIZE = 16
+    MAX_KEM_CIPHERTEXT_SIZE = 10000  # Conservative upper bound for ML-KEM-1024 (actual: 1568 bytes)
 
     # File format constants
     MAGIC = b'NAv1'
@@ -281,6 +282,11 @@ class PostQuantumFileEncryption:
                     sys.exit(1)
 
                 kem_ct_len = int.from_bytes(fin.read(4), byteorder='big')
+
+                # Validate KEM ciphertext length to prevent memory exhaustion attacks
+                if kem_ct_len <= 0 or kem_ct_len > PostQuantumFileEncryption.MAX_KEM_CIPHERTEXT_SIZE:
+                    raise ValueError(f"Invalid KEM ciphertext length: {kem_ct_len}")
+
                 ciphertext_kem = fin.read(kem_ct_len)
                 salt = fin.read(PostQuantumFileEncryption.SALT_SIZE)
                 base_nonce = fin.read(PostQuantumFileEncryption.NONCE_SIZE)
