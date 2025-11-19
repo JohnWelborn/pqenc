@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Script to copy newage.py to Docker container and run tests
+# Script to copy pqenc.py to Docker container and run tests
 # Usage: ./run_tests_in_docker.sh
 
 set -e  # Exit on any error
 
 CONTAINER_ID="3b4a2936afac"
-CONTAINER_PATH="/root/newage"
+CONTAINER_PATH="/root/pqenc"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> Copying newage.py to Docker container..."
-docker cp "${LOCAL_DIR}/newage.py" "${CONTAINER_ID}:${CONTAINER_PATH}/newage.py"
+echo "==> Copying pqenc.py to Docker container..."
+docker cp "${LOCAL_DIR}/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
 
 echo "==> Copying test.py to Docker container..."
 docker cp "${LOCAL_DIR}/test.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test.py"

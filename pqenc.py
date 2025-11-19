@@ -56,7 +56,7 @@ class PostQuantumFileEncryption:
     MAX_KEM_CIPHERTEXT_SIZE = 10000  # Conservative upper bound for ML-KEM-1024 (actual: 1568 bytes)
 
     # File format constants
-    MAGIC = b'NAv1'
+    MAGIC = b'PQE1'
 
     # AAD flags
     AAD_CHUNK = b'\x00'
@@ -172,7 +172,7 @@ class PostQuantumFileEncryption:
             algorithm=hashes.SHA256(),
             length=PostQuantumFileEncryption.AES_KEY_SIZE,
             salt=salt,
-            info=b'newage-v2-aes-key',
+            info=b'pqenc-v1-aes-key',
         )
         return hkdf.derive(shared_secret)
 
