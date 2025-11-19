@@ -117,8 +117,14 @@ class PostQuantumFileEncryption:
             print(f"  Private key: {private_key_path}")
             print(f"  Algorithm:   {PostQuantumFileEncryption.KEM_ALGORITHM}")
 
-        except Exception as e:
+        except (OSError, IOError, ValueError) as e:
             print(f"Error generating keypair: {e}")
+            sys.exit(1)
+        except Exception as e:
+            # Catch unexpected errors with full traceback for debugging
+            print(f"Unexpected error generating keypair: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
         finally:
             # Securely zero private key from memory
@@ -222,8 +228,17 @@ class PostQuantumFileEncryption:
             print(f"  Output: {output_path}")
             print(f"  Using:  {PostQuantumFileEncryption.KEM_ALGORITHM} + AES-256-GCM")
 
-        except Exception as e:
+        except (OSError, IOError, ValueError) as e:
             print(f"Error encrypting file: {e}")
+            # Clean up partial file
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            sys.exit(1)
+        except Exception as e:
+            # Catch unexpected errors with full traceback for debugging
+            print(f"Unexpected error encrypting file: {e}")
+            import traceback
+            traceback.print_exc()
             # Clean up partial file
             if os.path.exists(output_path):
                 os.remove(output_path)
@@ -306,9 +321,12 @@ class PostQuantumFileEncryption:
                         # Zero out plaintext after writing
                         PostQuantumFileEncryption._secure_zero(plaintext)
                     except Exception:
+                        # Intentional catch-all: AES-GCM decrypt can raise various exceptions
+                        # for authentication failures (wrong key, corrupted data, tampered AAD).
+                        # We treat all decryption failures as security-critical integrity violations.
                         print("Error: Decryption failed (Integrity check failed)")
                         print("Possible causes: Wrong key, corrupted file, or truncation attack.")
-                        # Delete partial outpu
+                        # Delete partial output
                         fout.close()
                         os.remove(output_path)
                         sys.exit(1)
@@ -317,8 +335,16 @@ class PostQuantumFileEncryption:
 
             print(f"File decrypted successfully: {output_path}")
 
-        except Exception as e:
+        except (OSError, IOError, ValueError) as e:
             print(f"Error decrypting file: {e}")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            sys.exit(1)
+        except Exception as e:
+            # Catch unexpected errors with full traceback for debugging
+            print(f"Unexpected error decrypting file: {e}")
+            import traceback
+            traceback.print_exc()
             if os.path.exists(output_path):
                 os.remove(output_path)
             sys.exit(1)
