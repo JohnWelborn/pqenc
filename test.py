@@ -457,6 +457,7 @@ class TestEncryptedFileFormat(unittest.TestCase):
         self.private_key_path = os.path.join(self.test_dir, "test_priv.key")
         self.plaintext_path = os.path.join(self.test_dir, "test_plain.txt")
         self.encrypted_path = os.path.join(self.test_dir, "test_encrypted.enc")
+        self.decrypted_path = os.path.join(self.test_dir, "test_decrypted.txt")
 
     def tearDown(self):
         """Clean up temporary files after tests."""
@@ -465,7 +466,7 @@ class TestEncryptedFileFormat(unittest.TestCase):
             shutil.rmtree(self.test_dir)
 
     def test_encrypted_file_format(self):
-        """Test that encrypted file has correct format structure."""
+        """Test that encrypted file has correct format structure (V1)."""
         # Generate keypair
         PostQuantumFileEncryption.generate_keypair(
             self.public_key_path,
@@ -486,28 +487,124 @@ class TestEncryptedFileFormat(unittest.TestCase):
 
         # Read and verify format
         with open(self.encrypted_path, 'rb') as f:
-            # Read KEM ciphertext length (4 bytes)
+            # 1. Magic (4 bytes)
+            magic = f.read(4)
+            self.assertEqual(magic, b'NAv1')
+
+            # 2. KEM ciphertext length (4 bytes)
             kem_ct_len_bytes = f.read(4)
             self.assertEqual(len(kem_ct_len_bytes), 4)
             kem_ct_len = int.from_bytes(kem_ct_len_bytes, byteorder='big')
 
             # Verify KEM ciphertext length is reasonable for ML-KEM-1024
-            # ML-KEM-1024 ciphertext is 1568 bytes
             self.assertEqual(kem_ct_len, 1568)
 
-            # Read KEM ciphertext
+            # 3. KEM ciphertext
             kem_ct = f.read(kem_ct_len)
             self.assertEqual(len(kem_ct), kem_ct_len)
 
-            # Read nonce (12 bytes)
-            nonce = f.read(PostQuantumFileEncryption.NONCE_SIZE)
-            self.assertEqual(len(nonce), 12)
+            # 4. Salt (16 bytes)
+            salt = f.read(16)
+            self.assertEqual(len(salt), 16)
 
-            # Read AES ciphertext + tag
-            aes_ct = f.read()
-            # AES-GCM adds 16-byte authentication tag
-            expected_aes_ct_len = len(test_data) + 16
-            self.assertEqual(len(aes_ct), expected_aes_ct_len)
+            # 5. Base Nonce (12 bytes)
+            base_nonce = f.read(12)
+            self.assertEqual(len(base_nonce), 12)
+
+            # 6. Chunks
+            # Since data is small, there should be one chunk
+            # Chunk format: Ciphertext + Tag (16 bytes)
+            chunk = f.read()
+            expected_chunk_len = len(test_data) + 16
+            self.assertEqual(len(chunk), expected_chunk_len)
+
+    def test_truncation_attack(self):
+        """Test that decryption fails if the file is truncated."""
+        # Generate keypair
+        PostQuantumFileEncryption.generate_keypair(
+            self.public_key_path,
+            self.private_key_path
+        )
+
+        # Create test plaintext (large enough to potentially have multiple chunks if we lowered chunk size, 
+        # but here just ensure it has some data)
+        test_data = os.urandom(1000)
+        with open(self.plaintext_path, 'wb') as f:
+            f.write(test_data)
+
+        # Encrypt the file
+        PostQuantumFileEncryption.encrypt_file(
+            self.plaintext_path,
+            self.encrypted_path,
+            self.public_key_path
+        )
+
+        # Truncate the encrypted file by 1 byte (corrupting the tag or missing the last byte)
+        file_size = os.path.getsize(self.encrypted_path)
+        with open(self.encrypted_path, 'rb+') as f:
+            f.truncate(file_size - 1)
+
+        # Try to decrypt - should fail
+        with self.assertRaises(SystemExit):
+            PostQuantumFileEncryption.decrypt_file(
+                self.encrypted_path,
+                self.decrypted_path,
+                self.private_key_path
+            )
+
+    def test_chunk_reordering_attack(self):
+        """Test that swapping chunks fails decryption."""
+        # This requires enough data for at least 2 chunks
+        # CHUNK_SIZE is 64KB. Let's make 150KB file.
+        
+        # Generate keypair
+        PostQuantumFileEncryption.generate_keypair(
+            self.public_key_path,
+            self.private_key_path
+        )
+
+        data_size = 150 * 1024
+        test_data = os.urandom(data_size)
+        with open(self.plaintext_path, 'wb') as f:
+            f.write(test_data)
+
+        PostQuantumFileEncryption.encrypt_file(
+            self.plaintext_path,
+            self.encrypted_path,
+            self.public_key_path
+        )
+
+        # We need to manually manipulate the file to swap chunks.
+        # Header size = 4 + 4 + 1568 + 16 + 12 = 1604 bytes
+        # Chunk 1 size = 64KB + 16 = 65552 bytes
+        # Chunk 2 size = 64KB + 16 = 65552 bytes
+        # Chunk 3 size = remainder + 16
+        
+        header_size = 4 + 4 + 1568 + 16 + 12
+        chunk_overhead = 16
+        chunk_payload = 64 * 1024
+        full_chunk_size = chunk_payload + chunk_overhead
+        
+        with open(self.encrypted_path, 'rb') as f:
+            header = f.read(header_size)
+            chunk1 = f.read(full_chunk_size)
+            chunk2 = f.read(full_chunk_size)
+            rest = f.read()
+            
+        # Swap chunk 1 and chunk 2
+        with open(self.encrypted_path, 'wb') as f:
+            f.write(header)
+            f.write(chunk2)
+            f.write(chunk1)
+            f.write(rest)
+            
+        # Decrypt should fail (tag mismatch because nonce depends on counter)
+        with self.assertRaises(SystemExit):
+            PostQuantumFileEncryption.decrypt_file(
+                self.encrypted_path,
+                self.decrypted_path,
+                self.private_key_path
+            )
 
 
 if __name__ == '__main__':

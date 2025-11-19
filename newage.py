@@ -2,6 +2,7 @@
 """
 Post-Quantum File Encryption Tool
 Uses ML-KEM-1024 (Kyber) for key encapsulation and AES-256-GCM for file encryption.
+Supports streaming encryption for large files.
 """
 
 import argparse
@@ -26,9 +27,19 @@ except ImportError:
 class PostQuantumFileEncryption:
     """Post-quantum secure file encryption using ML-KEM-1024 and AES-256-GCM."""
 
-    KEM_ALGORITHM = "ML-KEM-1024"  # Post-quantum key encapsulation mechanism
+    KEM_ALGORITHM = "ML-KEM-1024"
     AES_KEY_SIZE = 32  # 256 bits
     NONCE_SIZE = 12  # 96 bits for GCM
+    SALT_SIZE = 16
+    CHUNK_SIZE = 64 * 1024  # 64KB chunks
+    TAG_SIZE = 16
+
+    # File format constants
+    MAGIC = b'NAv1'
+
+    # AAD flags
+    AAD_CHUNK = b'\x00'
+    AAD_LAST_CHUNK = b'\x01'
 
     def __init__(self):
         """Initialize the encryption system."""
@@ -38,38 +49,26 @@ class PostQuantumFileEncryption:
     def generate_keypair(public_key_path: str, private_key_path: str) -> None:
         """
         Generate ML-KEM-1024 public/private key pair and save to files.
-
-        Args:
-            public_key_path: Path where public key will be saved
-            private_key_path: Path where private key will be saved
         """
         try:
-            # Check if output files already exist
             if os.path.exists(public_key_path):
                 print(f"Error: Public key file already exists: {public_key_path}")
-                print("Refusing to overwrite. Please remove the file or choose a different path.")
                 sys.exit(1)
 
             if os.path.exists(private_key_path):
                 print(f"Error: Private key file already exists: {private_key_path}")
-                print("Refusing to overwrite. Please remove the file or choose a different path.")
                 sys.exit(1)
 
-            # Initialize KEM with ML-KEM-1024
             kem = oqs.KeyEncapsulation(PostQuantumFileEncryption.KEM_ALGORITHM)
-
-            # Generate keypair
             public_key = kem.generate_keypair()
             private_key = kem.export_secret_key()
 
-            # Save keys to files
             with open(public_key_path, 'wb') as f:
                 f.write(public_key)
 
             with open(private_key_path, 'wb') as f:
                 f.write(private_key)
 
-            # Set restrictive permissions on private key
             os.chmod(private_key_path, 0o600)
 
             print(f"Key pair generated successfully")
@@ -82,154 +81,172 @@ class PostQuantumFileEncryption:
             sys.exit(1)
 
     @staticmethod
-    def _derive_aes_key(shared_secret: bytes) -> bytes:
-        """
-        Derive AES-256 key from shared secret using HKDF.
-
-        Args:
-            shared_secret: The shared secret from KEM
-
-        Returns:
-            32-byte AES-256 key
-        """
+    def _derive_aes_key(shared_secret: bytes, salt: bytes) -> bytes:
+        """Derive AES-256 key from shared secret using HKDF."""
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=PostQuantumFileEncryption.AES_KEY_SIZE,
-            salt=None,
-            info=b'file-encryption-aes-key',
+            salt=salt,
+            info=b'newage-v2-aes-key',
         )
         return hkdf.derive(shared_secret)
 
     @staticmethod
-    def encrypt_file(input_path: str, output_path: str, public_key_path: str) -> None:
-        """
-        Encrypt a file using ML-KEM-1024 and AES-256-GCM.
+    def _get_nonce(base_nonce: bytes, counter: int) -> bytes:
+        """Generate unique nonce for each chunk."""
+        # Convert base_nonce to integer, add counter, convert back
+        # This is a simple way to increment the nonce
+        nonce_int = int.from_bytes(base_nonce, byteorder='big')
+        nonce_int = (nonce_int + counter) % (2**(PostQuantumFileEncryption.NONCE_SIZE * 8))
+        return nonce_int.to_bytes(PostQuantumFileEncryption.NONCE_SIZE, byteorder='big')
 
-        Args:
-            input_path: Path to file to encrypt
-            output_path: Path where encrypted file will be saved
-            public_key_path: Path to public key file
-        """
+    @staticmethod
+    def encrypt_file(input_path: str, output_path: str, public_key_path: str) -> None:
+        """Encrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
         try:
-            # Check if output file already exists
             if os.path.exists(output_path):
                 print(f"Error: Output file already exists: {output_path}")
-                print("Refusing to overwrite. Please remove the file or choose a different path.")
                 sys.exit(1)
 
-            # Read public key
             with open(public_key_path, 'rb') as f:
                 public_key = f.read()
 
-            # Read input file
-            with open(input_path, 'rb') as f:
-                plaintext = f.read()
-
-            # Initialize KEM and encapsulate to get shared secret
+            # Initialize KEM
             kem = oqs.KeyEncapsulation(PostQuantumFileEncryption.KEM_ALGORITHM)
             ciphertext_kem, shared_secret = kem.encap_secret(public_key)
 
-            # Derive AES key from shared secret
-            aes_key = PostQuantumFileEncryption._derive_aes_key(shared_secret)
+            # Generate salt and base nonce
+            salt = os.urandom(PostQuantumFileEncryption.SALT_SIZE)
+            base_nonce = os.urandom(PostQuantumFileEncryption.NONCE_SIZE)
 
-            # Generate random nonce for AES-GCM
-            nonce = os.urandom(PostQuantumFileEncryption.NONCE_SIZE)
-
-            # Encrypt file data with AES-256-GCM
+            # Derive AES key
+            aes_key = PostQuantumFileEncryption._derive_aes_key(shared_secret, salt)
             aesgcm = AESGCM(aes_key)
-            ciphertext_aes = aesgcm.encrypt(nonce, plaintext, None)
 
-            # Write encrypted data to file
-            # Format: [kem_ciphertext_length(4)][kem_ciphertext][nonce(12)][aes_ciphertext+tag]
-            with open(output_path, 'wb') as f:
-                # Write KEM ciphertext length (4 bytes, big-endian)
+            with open(input_path, 'rb') as fin, open(output_path, 'wb') as fout:
+                # Write Header
+                fout.write(PostQuantumFileEncryption.MAGIC)
+
+                # Write KEM ciphertext length and conten
                 kem_ct_len = len(ciphertext_kem)
-                f.write(kem_ct_len.to_bytes(4, byteorder='big'))
+                fout.write(kem_ct_len.to_bytes(4, byteorder='big'))
+                fout.write(ciphertext_kem)
 
-                # Write KEM ciphertext (encapsulated shared secret)
-                f.write(ciphertext_kem)
+                # Write Salt and Base Nonce
+                fout.write(salt)
+                fout.write(base_nonce)
 
-                # Write nonce
-                f.write(nonce)
+                # Stream encryption
+                chunk_index = 0
 
-                # Write AES ciphertext (includes authentication tag)
-                f.write(ciphertext_aes)
+                # Read first chunk
+                current_chunk = fin.read(PostQuantumFileEncryption.CHUNK_SIZE)
 
+                while True:
+                    # Try to read next chunk to determine if current is las
+                    next_chunk = fin.read(PostQuantumFileEncryption.CHUNK_SIZE)
+
+                    if not next_chunk:
+                        aad = PostQuantumFileEncryption.AAD_LAST_CHUNK
+                    else:
+                        aad = PostQuantumFileEncryption.AAD_CHUNK
+
+                    nonce = PostQuantumFileEncryption._get_nonce(base_nonce, chunk_index)
+                    ciphertext = aesgcm.encrypt(nonce, current_chunk, aad)
+                    fout.write(ciphertext)
+
+                    chunk_index += 1
+
+                    if not next_chunk:
+                        break
+
+                    current_chunk = next_chunk
+
+            input_size = os.path.getsize(input_path)
             print(f"File encrypted successfully")
-            print(f"  Input:  {input_path} ({len(plaintext)} bytes)")
+            print(f"  Input:  {input_path} ({input_size} bytes)")
             print(f"  Output: {output_path}")
             print(f"  Using:  {PostQuantumFileEncryption.KEM_ALGORITHM} + AES-256-GCM")
 
-        except FileNotFoundError as e:
-            print(f"Error: File not found - {e}")
-            sys.exit(1)
         except Exception as e:
             print(f"Error encrypting file: {e}")
+            # Clean up partial file
+            if os.path.exists(output_path):
+                os.remove(output_path)
             sys.exit(1)
 
     @staticmethod
     def decrypt_file(input_path: str, output_path: str, private_key_path: str) -> None:
-        """
-        Decrypt a file using ML-KEM-1024 and AES-256-GCM.
-
-        Args:
-            input_path: Path to encrypted file
-            output_path: Path where decrypted file will be saved
-            private_key_path: Path to private key file
-        """
+        """Decrypt a file using streaming ML-KEM-1024 and AES-256-GCM."""
         try:
-            # Check if output file already exists
             if os.path.exists(output_path):
                 print(f"Error: Output file already exists: {output_path}")
-                print("Refusing to overwrite. Please remove the file or choose a different path.")
                 sys.exit(1)
 
-            # Read private key
             with open(private_key_path, 'rb') as f:
                 private_key = f.read()
 
-            # Read encrypted file
-            with open(input_path, 'rb') as f:
-                # Read KEM ciphertext length
-                kem_ct_len = int.from_bytes(f.read(4), byteorder='big')
+            with open(input_path, 'rb') as fin, open(output_path, 'wb') as fout:
+                # Read Header
+                magic = fin.read(4)
+                if magic != PostQuantumFileEncryption.MAGIC:
+                    print("Error: Invalid file format or version")
+                    sys.exit(1)
 
-                # Read KEM ciphertext
-                ciphertext_kem = f.read(kem_ct_len)
+                kem_ct_len = int.from_bytes(fin.read(4), byteorder='big')
+                ciphertext_kem = fin.read(kem_ct_len)
+                salt = fin.read(PostQuantumFileEncryption.SALT_SIZE)
+                base_nonce = fin.read(PostQuantumFileEncryption.NONCE_SIZE)
 
-                # Read nonce
-                nonce = f.read(PostQuantumFileEncryption.NONCE_SIZE)
+                # Decapsulate
+                kem = oqs.KeyEncapsulation(PostQuantumFileEncryption.KEM_ALGORITHM, secret_key=private_key)
+                shared_secret = kem.decap_secret(ciphertext_kem)
 
-                # Read AES ciphertext + tag
-                ciphertext_aes = f.read()
+                # Derive AES key
+                aes_key = PostQuantumFileEncryption._derive_aes_key(shared_secret, salt)
+                aesgcm = AESGCM(aes_key)
 
-            # Initialize KEM with private key and decapsulate to recover shared secret
-            kem = oqs.KeyEncapsulation(PostQuantumFileEncryption.KEM_ALGORITHM, secret_key=private_key)
-            shared_secret = kem.decap_secret(ciphertext_kem)
+                # Stream decryption
+                chunk_index = 0
+                encrypted_chunk_size = PostQuantumFileEncryption.CHUNK_SIZE + PostQuantumFileEncryption.TAG_SIZE
 
-            # Derive AES key from shared secret
-            aes_key = PostQuantumFileEncryption._derive_aes_key(shared_secret)
+                # Get file size for EOF check
+                fin.seek(0, 2)
+                file_size = fin.tell()
+                fin.seek(4 + 4 + kem_ct_len + PostQuantumFileEncryption.SALT_SIZE + PostQuantumFileEncryption.NONCE_SIZE)
 
-            # Decrypt file data with AES-256-GCM
-            aesgcm = AESGCM(aes_key)
-            plaintext = aesgcm.decrypt(nonce, ciphertext_aes, None)
+                while True:
+                    chunk = fin.read(encrypted_chunk_size)
+                    if not chunk:
+                        break
 
-            # Write decrypted data to file
-            with open(output_path, 'wb') as f:
-                f.write(plaintext)
+                    # Check if we are at the end of the file
+                    if fin.tell() == file_size:
+                        aad = PostQuantumFileEncryption.AAD_LAST_CHUNK
+                    else:
+                        aad = PostQuantumFileEncryption.AAD_CHUNK
 
-            print(f"File decrypted successfully")
-            print(f"  Input:  {input_path}")
-            print(f"  Output: {output_path} ({len(plaintext)} bytes)")
+                    nonce = PostQuantumFileEncryption._get_nonce(base_nonce, chunk_index)
 
-        except FileNotFoundError as e:
-            print(f"Error: File not found - {e}")
-            sys.exit(1)
+                    try:
+                        plaintext = aesgcm.decrypt(nonce, chunk, aad)
+                        fout.write(plaintext)
+                    except Exception:
+                        print("Error: Decryption failed (Integrity check failed)")
+                        print("Possible causes: Wrong key, corrupted file, or truncation attack.")
+                        # Delete partial outpu
+                        fout.close()
+                        os.remove(output_path)
+                        sys.exit(1)
+
+                    chunk_index += 1
+
+            print(f"File decrypted successfully: {output_path}")
+
         except Exception as e:
             print(f"Error decrypting file: {e}")
-            print("  This could be due to:")
-            print("  - Wrong private key")
-            print("  - Corrupted encrypted file")
-            print("  - File was not encrypted with this tool")
+            if os.path.exists(output_path):
+                os.remove(output_path)
             sys.exit(1)
 
 
@@ -266,7 +283,7 @@ Examples:
     parser.add_argument('--private-key', metavar='FILE',
                        help='Path to private key file')
 
-    # Output
+    # Outpu
     parser.add_argument('--output', metavar='FILE',
                        help='Output file path (for encrypt/decrypt)')
 
