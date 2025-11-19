@@ -6,7 +6,7 @@
 set -e  # Exit on any error
 
 CONTAINER_ID="3b4a2936afac"
-CONTAINER_PATH="/root/pqenc"
+CONTAINER_PATH="/opt/"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> Copying pqenc.py to Docker container..."

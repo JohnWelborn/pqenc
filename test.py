@@ -489,7 +489,7 @@ class TestEncryptedFileFormat(unittest.TestCase):
         with open(self.encrypted_path, 'rb') as f:
             # 1. Magic (4 bytes)
             magic = f.read(4)
-            self.assertEqual(magic, b'NAv1')
+            self.assertEqual(magic, b'PQE1')
 
             # 2. KEM ciphertext length (4 bytes)
             kem_ct_len_bytes = f.read(4)
