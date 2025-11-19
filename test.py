@@ -50,6 +50,49 @@ class TestPostQuantumFileEncryption(unittest.TestCase):
             permissions = stat_info.st_mode & 0o777
             self.assertEqual(permissions, 0o600)
 
+    def test_keys_are_base64_encoded(self):
+        """Test that generated keys are stored as valid base64-encoded text."""
+        from base64 import b64decode
+
+        PostQuantumFileEncryption.generate_keypair(
+            self.public_key_path,
+            self.private_key_path
+        )
+
+        # Read public key
+        with open(self.public_key_path, 'r') as f:
+            public_key_text = f.read()
+
+        # Read private key
+        with open(self.private_key_path, 'r') as f:
+            private_key_text = f.read()
+
+        # Verify keys are text (ASCII/UTF-8), not binary
+        self.assertIsInstance(public_key_text, str)
+        self.assertIsInstance(private_key_text, str)
+
+        # Verify keys contain only base64 characters (A-Z, a-z, 0-9, +, /, =)
+        import re
+        base64_pattern = re.compile(r'^[A-Za-z0-9+/=]+$')
+        self.assertTrue(base64_pattern.match(public_key_text.strip()),
+                        "Public key should contain only base64 characters")
+        self.assertTrue(base64_pattern.match(private_key_text.strip()),
+                        "Private key should contain only base64 characters")
+
+        # Verify keys can be decoded from base64 without errors
+        try:
+            public_key_bytes = b64decode(public_key_text)
+            private_key_bytes = b64decode(private_key_text)
+        except Exception as e:
+            self.fail(f"Failed to decode keys from base64: {e}")
+
+        # Verify decoded keys are not empty and have reasonable sizes
+        # ML-KEM-1024 public key should be 1568 bytes, private key should be 3168 bytes
+        self.assertGreater(len(public_key_bytes), 1000, "Decoded public key too small")
+        self.assertGreater(len(private_key_bytes), 2000, "Decoded private key too small")
+        self.assertLess(len(public_key_bytes), 5000, "Decoded public key too large")
+        self.assertLess(len(private_key_bytes), 10000, "Decoded private key too large")
+
     def test_generate_keypair_refuse_overwrite_public(self):
         """Test that generate_keypair refuses to overwrite existing public key."""
         # Create initial keypair

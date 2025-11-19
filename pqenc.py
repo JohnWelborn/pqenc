@@ -9,6 +9,7 @@ import argparse
 import ctypes
 import os
 import sys
+from base64 import b64encode, b64decode
 
 try:
     import oqs
@@ -138,11 +139,12 @@ class PostQuantumFileEncryption:
             public_key = kem.generate_keypair()
             private_key = kem.export_secret_key()
 
-            with open(public_key_path, 'wb') as f:
-                f.write(public_key)
+            # Save keys as base64-encoded text
+            with open(public_key_path, 'w') as f:
+                f.write(b64encode(public_key).decode('ascii'))
 
-            with open(private_key_path, 'wb') as f:
-                f.write(private_key)
+            with open(private_key_path, 'w') as f:
+                f.write(b64encode(private_key).decode('ascii'))
 
             os.chmod(private_key_path, 0o600)
 
@@ -220,8 +222,9 @@ class PostQuantumFileEncryption:
                 print(f"Error: Output file already exists: {output_path}")
                 sys.exit(1)
 
-            with open(public_key_path, 'rb') as f:
-                public_key = f.read()
+            # Load base64-encoded public key
+            with open(public_key_path, 'r') as f:
+                public_key = b64decode(f.read().strip())
 
             # Initialize KEM
             kem = oqs.KeyEncapsulation(PostQuantumFileEncryption.KEM_ALGORITHM)
@@ -344,8 +347,9 @@ class PostQuantumFileEncryption:
                 print(f"Error: Output file already exists: {output_path}")
                 sys.exit(1)
 
-            with open(private_key_path, 'rb') as f:
-                private_key = f.read()
+            # Load base64-encoded private key
+            with open(private_key_path, 'r') as f:
+                private_key = b64decode(f.read().strip())
 
             with open(input_path, 'rb') as fin, open(output_path, 'wb') as fout:
                 # Read Header
