@@ -37,7 +37,7 @@ def main():
     decrypted_file = "test_data/decrypted.dat"
     
     print("--- Step 1: Generate Keys ---")
-    run_command(f"python3 newage.py --generate-keys --public-key {pub_key} --private-key {priv_key}")
+    run_command(f"python3 pqenc.py --generate-keys --public-key {pub_key} --private-key {priv_key}")
     
     print("\n--- Step 2: Create Large File (10MB) ---")
     with open(original_file, 'wb') as f:
@@ -46,10 +46,10 @@ def main():
     print(f"Original Hash: {original_hash}")
     
     print("\n--- Step 3: Encrypt File ---")
-    run_command(f"python3 newage.py --encrypt {original_file} --output {encrypted_file} --public-key {pub_key}")
+    run_command(f"python3 paenc.py --encrypt {original_file} --output {encrypted_file} --public-key {pub_key}")
     
     print("\n--- Step 4: Decrypt File ---")
-    run_command(f"python3 newage.py --decrypt {encrypted_file} --output {decrypted_file} --private-key {priv_key}")
+    run_command(f"python3 pqenc.py --decrypt {encrypted_file} --output {decrypted_file} --private-key {priv_key}")
     
     print("\n--- Step 5: Verify Hash ---")
     decrypted_hash = calculate_hash(decrypted_file)
@@ -68,7 +68,7 @@ def main():
         f.truncate(file_size - 100)
     
     print("Attempting to decrypt truncated file (should fail)...")
-    result = subprocess.run(f"python3 newage.py --decrypt {encrypted_file} --output {decrypted_file} --private-key {priv_key}", 
+    result = subprocess.run(f"python3 pqenc.py --decrypt {encrypted_file} --output {decrypted_file} --private-key {priv_key}", 
                             shell=True, capture_output=True, text=True)
     
     if result.returncode != 0:
