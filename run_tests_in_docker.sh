@@ -15,8 +15,14 @@ docker cp "${LOCAL_DIR}/newage.py" "${CONTAINER_ID}:${CONTAINER_PATH}/newage.py"
 echo "==> Copying test.py to Docker container..."
 docker cp "${LOCAL_DIR}/test.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test.py"
 
-echo "==> Running tests in Docker container..."
+echo "==> Copying test_integration.py to Docker container..."
+docker cp "${LOCAL_DIR}/test_integration.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration.py"
+
+echo "==> Running unit tests in Docker container..."
 docker exec "${CONTAINER_ID}" bash -c "cd ${CONTAINER_PATH} && .venv/bin/pytest test.py -v"
 
+echo "==> Running integration tests in Docker container..."
+docker exec "${CONTAINER_ID}" bash -c "cd ${CONTAINER_PATH} && .venv/bin/python3 test_integration.py"
+
 echo ""
-echo "==> Tests completed successfully!"
+echo "==> All tests completed successfully!"
