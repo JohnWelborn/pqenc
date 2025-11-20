@@ -279,6 +279,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let cipher = Aes256Gcm::new(key);
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
+    let input_size = fin.metadata()?.len();
     let mut fout = File::create(output_path).context("Failed to create output file")?;
 
     // Write Header
@@ -328,7 +329,6 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         n_current = n_next;
     }
 
-    let input_size = fs::metadata(input_path)?.len();
     println!("File encrypted successfully");
     println!("  Input:  {} ({} bytes)", input_path, input_size);
     println!("  Output: {}", output_path);
