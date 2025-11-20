@@ -10,6 +10,7 @@ use rand::RngCore;
 use sha2::Sha256;
 use std::fs::{self, File};
 use std::io::{Read, Write, Seek};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use base64::prelude::*;
@@ -157,14 +158,25 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let sk_b64 = BASE64_STANDARD.encode(&_secret_guard.data);
 
     fs::write(public_key_path, pk_b64)?;
-    
+
     // Write private key and set permissions
     {
         let mut file = File::create(private_key_path)?;
         file.write_all(sk_b64.as_bytes())?;
-        let mut perms = file.metadata()?.permissions();
-        perms.set_mode(0o600);
-        file.set_permissions(perms)?;
+
+        // Set restrictive permissions on private key
+        #[cfg(unix)]
+        {
+            let mut perms = file.metadata()?.permissions();
+            perms.set_mode(0o600);
+            file.set_permissions(perms)?;
+        }
+
+        #[cfg(windows)]
+        {
+            let mut perms = file.metadata()?.permissions();
+            perms.set_readonly(false); // Ensure we can read it
+        }
     }
 
     println!("Key pair generated successfully");
