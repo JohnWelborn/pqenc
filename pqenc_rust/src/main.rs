@@ -293,17 +293,14 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 
     let mut chunk_index = 0;
 
-
-    
+    // Allocate buffers once and reuse them
     let mut current_chunk = vec![0u8; CHUNK_SIZE];
+    let mut next_chunk = vec![0u8; CHUNK_SIZE];
     let mut n_current = fin.read(&mut current_chunk)?;
-    
 
-    
     loop {
-        let mut next_chunk = vec![0u8; CHUNK_SIZE];
         let n_next = fin.read(&mut next_chunk)?;
-        
+
         let aad = if n_next == 0 { AAD_LAST_CHUNK } else { AAD_CHUNK };
 
         let nonce = get_nonce(&base_nonce, chunk_index)?;
@@ -311,22 +308,23 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
             msg: &current_chunk[..n_current],
             aad,
         };
-        
+
         let ciphertext = cipher.encrypt(&nonce, payload)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-            
+
         fout.write_all(&ciphertext)?;
-        
-        // Zeroize current chunk
-        current_chunk.zeroize();
-        
+
         chunk_index += 1;
-        
+
         if n_next == 0 {
+            // Zeroize both buffers before exit
+            current_chunk.zeroize();
+            next_chunk.zeroize();
             break;
         }
-        
-        current_chunk = next_chunk;
+
+        // Swap buffers to avoid reallocation
+        std::mem::swap(&mut current_chunk, &mut next_chunk);
         n_current = n_next;
     }
 
