@@ -210,11 +210,16 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn derive_aes_key(shared_secret: &[u8], salt: &[u8]) -> SensitiveData {
+/// Derives an AES-256 key from a shared secret using HKDF-SHA256.
+///
+/// Uses HKDF with the provided salt and info string "pqenc-v1-aes-key"
+/// to derive a 32-byte key suitable for AES-256-GCM.
+fn derive_aes_key(shared_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> {
     let hkdf = Hkdf::<Sha256>::new(Some(salt), shared_secret);
     let mut okm = vec![0u8; AES_KEY_SIZE];
-    hkdf.expand(b"pqenc-v1-aes-key", &mut okm).expect("HKDF expand failed");
-    SensitiveData::new(okm)
+    hkdf.expand(b"pqenc-v1-aes-key", &mut okm)
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {}", e))?;
+    Ok(SensitiveData::new(okm))
 }
 
 use aes_gcm::aead::consts::U12;
@@ -269,7 +274,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let mut base_nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut base_nonce);
 
-    let aes_key = derive_aes_key(&secret_guard.data, &salt);
+    let aes_key = derive_aes_key(&secret_guard.data, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
@@ -380,7 +385,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let shared_secret = kem.decapsulate(sk_ref, ct_ref)?;
     let secret_guard = SensitiveData::new(shared_secret.into_vec());
 
-    let aes_key = derive_aes_key(&secret_guard.data, &salt);
+    let aes_key = derive_aes_key(&secret_guard.data, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
