@@ -196,11 +196,13 @@ fn derive_aes_key(shared_secret: &[u8], salt: &[u8]) -> SensitiveData {
 
 use aes_gcm::aead::consts::U12;
 
-fn get_nonce(base_nonce: &[u8], counter: u64) -> Nonce<U12> { // Using generic Nonce type
-    // We only use the lower 96 bits (12 bytes)
-    // The python code does: int.from_bytes(base_nonce, 'big') + counter
-    // base_nonce is 12 bytes.
-    
+/// Derives a nonce by adding a counter to a base nonce.
+///
+/// Converts the 12-byte base nonce to a u128, adds the counter,
+/// and converts back to a 12-byte nonce. Returns an error if the
+/// counter would cause an overflow, preventing nonce reuse.
+fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
+    // Convert 12-byte base nonce to u128 (padding with 4 zero bytes at start)
     let base_int = u128::from_be_bytes([
         0, 0, 0, 0,
         base_nonce[0], base_nonce[1], base_nonce[2], base_nonce[3],
@@ -208,14 +210,16 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Nonce<U12> { // Using generic N
         base_nonce[8], base_nonce[9], base_nonce[10], base_nonce[11],
     ]);
 
-    let new_int = base_int.wrapping_add(counter as u128);
-    
+    // Use checked_add to detect overflow - critical for AES-GCM security
+    let new_int = base_int.checked_add(counter as u128)
+        .ok_or_else(|| anyhow::anyhow!("Nonce counter overflow - file too large"))?;
+
     let bytes = new_int.to_be_bytes();
     // Take last 12 bytes
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes.copy_from_slice(&bytes[4..16]);
-    
-    *Nonce::from_slice(&nonce_bytes)
+
+    Ok(*Nonce::from_slice(&nonce_bytes))
 }
 
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
@@ -268,8 +272,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         let n_next = fin.read(&mut next_chunk)?;
         
         let aad = if n_next == 0 { AAD_LAST_CHUNK } else { AAD_CHUNK };
-        
-        let nonce = get_nonce(&base_nonce, chunk_index);
+
+        let nonce = get_nonce(&base_nonce, chunk_index)?;
         let payload = Payload {
             msg: &current_chunk[..n_current],
             aad,
@@ -374,8 +378,8 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
         
         let current_pos = fin.stream_position()?;
         let aad = if current_pos == file_len { AAD_LAST_CHUNK } else { AAD_CHUNK };
-        
-        let nonce = get_nonce(&base_nonce, chunk_index);
+
+        let nonce = get_nonce(&base_nonce, chunk_index)?;
         let payload = Payload {
             msg: &buffer[..bytes_read],
             aad,
