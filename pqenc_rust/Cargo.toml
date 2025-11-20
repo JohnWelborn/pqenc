@@ -1,0 +1,30 @@
+[package]
+name = "pqenc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ML-KEM-1024 (Kyber)
+oqs = { version = "0.11.0", features = ["kems"] }
+
+# AES-256-GCM
+aes-gcm = "0.10.3"
+
+# Key Derivation
+hkdf = "0.12.4"
+sha2 = "0.10.8"
+
+# Randomness
+rand = "0.8.5"
+
+# CLI
+clap = { version = "4.5.4", features = ["derive"] }
+
+# Encoding
+base64 = "0.22.1"
+
+# Error Handling
+anyhow = "1.0.82"
+
+# Secure Memory
+zeroize = { version = "1.7.0", features = ["derive"] }
