@@ -1,3 +1,25 @@
+//! Post-Quantum File Encryption Tool
+//!
+//! Provides hybrid post-quantum encryption using ML-KEM-1024 (NIST FIPS 203)
+//! for key encapsulation and AES-256-GCM for symmetric encryption.
+//!
+//! # Security Features
+//! - ML-KEM-1024: Post-quantum secure key encapsulation mechanism
+//! - AES-256-GCM: Authenticated encryption with additional data
+//! - HKDF-SHA256: Cryptographic key derivation
+//! - Zeroization: Automatic clearing of sensitive data from memory
+//! - Chunked encryption: 64KB chunks with unique nonces and authentication
+//!
+//! # File Format
+//! ```text
+//! [4 bytes: Magic "PQE1"]
+//! [4 bytes: KEM ciphertext length]
+//! [N bytes: KEM ciphertext]
+//! [16 bytes: Salt for HKDF]
+//! [12 bytes: Base nonce]
+//! [Encrypted chunks with 16-byte authentication tags]
+//! ```
+
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
@@ -158,6 +180,19 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// Generates a new ML-KEM-1024 keypair and saves to files.
+///
+/// Creates a new post-quantum key pair using ML-KEM-1024 algorithm,
+/// encodes both keys as base64, and saves them to the specified paths.
+/// On Unix systems, sets private key permissions to 0o600 for security.
+///
+/// # Arguments
+/// * `public_key_path` - Path where public key will be saved
+/// * `private_key_path` - Path where private key will be saved
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err` if files already exist, paths are invalid, or key generation fails
 fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     // Validate paths
     validate_path(public_key_path, false, "Public key")?;
@@ -250,6 +285,22 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     Ok(*Nonce::from_slice(&nonce_bytes))
 }
 
+/// Encrypts a file using ML-KEM-1024 + AES-256-GCM.
+///
+/// Performs hybrid post-quantum encryption:
+/// 1. Encapsulates a shared secret using the recipient's ML-KEM-1024 public key
+/// 2. Derives an AES-256 key from the shared secret using HKDF-SHA256
+/// 3. Encrypts the file in 64KB chunks using AES-256-GCM with unique nonces
+/// 4. Writes encrypted output with header containing KEM ciphertext, salt, and base nonce
+///
+/// # Arguments
+/// * `input_path` - Path to plaintext file to encrypt
+/// * `output_path` - Path where encrypted file will be written
+/// * `public_key_path` - Path to recipient's ML-KEM-1024 public key
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err` if validation fails, encryption fails, or I/O errors occur
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     // Validate all paths
     validate_path(input_path, true, "Input file")?;
@@ -337,6 +388,23 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     Ok(())
 }
 
+/// Decrypts a file encrypted with ML-KEM-1024 + AES-256-GCM.
+///
+/// Performs hybrid post-quantum decryption:
+/// 1. Reads and validates file header (magic bytes, KEM ciphertext, salt, nonce)
+/// 2. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
+/// 3. Derives the AES-256 key from the shared secret using HKDF-SHA256
+/// 4. Decrypts chunks using AES-256-GCM, verifying authentication tags
+/// 5. Deletes partial output and returns error if integrity check fails
+///
+/// # Arguments
+/// * `input_path` - Path to encrypted file
+/// * `output_path` - Path where decrypted file will be written
+/// * `private_key_path` - Path to ML-KEM-1024 private key
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
 fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
     // Validate all paths
     validate_path(input_path, true, "Input file")?;
