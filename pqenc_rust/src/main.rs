@@ -101,6 +101,25 @@ fn main() {
     }
 }
 
+/// Validates a file path for basic sanity checks.
+fn validate_path(path: &str, must_exist: bool, description: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("{} path cannot be empty", description);
+    }
+
+    let p = std::path::Path::new(path);
+
+    if must_exist && !p.exists() {
+        bail!("{} does not exist: {}", description, path);
+    }
+
+    if p.exists() && p.is_dir() {
+        bail!("{} is a directory, not a file: {}", description, path);
+    }
+
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -140,6 +159,10 @@ fn run() -> Result<()> {
 }
 
 fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
+    // Validate paths
+    validate_path(public_key_path, false, "Public key")?;
+    validate_path(private_key_path, false, "Private key")?;
+
     if std::path::Path::new(public_key_path).exists() {
         bail!("Public key file already exists: {}", public_key_path);
     }
@@ -223,6 +246,11 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
 }
 
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
+    // Validate all paths
+    validate_path(input_path, true, "Input file")?;
+    validate_path(output_path, false, "Output file")?;
+    validate_path(public_key_path, true, "Public key")?;
+
     if std::path::Path::new(output_path).exists() {
         bail!("Output file already exists: {}", output_path);
     }
@@ -307,6 +335,11 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 }
 
 fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
+    // Validate all paths
+    validate_path(input_path, true, "Input file")?;
+    validate_path(output_path, false, "Output file")?;
+    validate_path(private_key_path, true, "Private key")?;
+
     if std::path::Path::new(output_path).exists() {
         bail!("Output file already exists: {}", output_path);
     }
