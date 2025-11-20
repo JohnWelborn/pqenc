@@ -172,13 +172,13 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
 
     let kem = Kem::new(KEM_ALGORITHM)?;
     let (public_key, secret_key) = kem.keypair()?;
-    
+
     // Wrap secret key for zeroization
-    let _secret_guard = SensitiveData::new(secret_key.into_vec());
+    let secret_guard = SensitiveData::new(secret_key.into_vec());
 
     // Save keys as base64
     let pk_b64 = BASE64_STANDARD.encode(public_key.as_ref());
-    let sk_b64 = BASE64_STANDARD.encode(&_secret_guard.data);
+    let sk_b64 = BASE64_STANDARD.encode(&secret_guard.data);
 
     fs::write(public_key_path, pk_b64)?;
 
@@ -261,7 +261,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let kem = Kem::new(KEM_ALGORITHM)?;
     let pk_ref = kem.public_key_from_bytes(&pk_bytes).context("Invalid public key")?;
     let (ciphertext_kem, shared_secret) = kem.encapsulate(pk_ref)?;
-    let _secret_guard = SensitiveData::new(shared_secret.into_vec());
+    let secret_guard = SensitiveData::new(shared_secret.into_vec());
 
     let mut salt = [0u8; SALT_SIZE];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -269,7 +269,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let mut base_nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut base_nonce);
 
-    let aes_key = derive_aes_key(&_secret_guard.data, &salt);
+    let aes_key = derive_aes_key(&secret_guard.data, &salt);
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
@@ -346,10 +346,10 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     let sk_b64 = fs::read_to_string(private_key_path).context("Failed to read private key")?;
     let sk_bytes = BASE64_STANDARD.decode(sk_b64.trim()).context("Failed to decode private key")?;
-    let _sk_guard = SensitiveData::new(sk_bytes);
+    let sk_guard = SensitiveData::new(sk_bytes);
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
-    
+
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
     if magic != MAGIC {
@@ -375,12 +375,12 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     let kem = Kem::new(KEM_ALGORITHM)?;
     // oqs-rs expects secret key as reference
-    let sk_ref = kem.secret_key_from_bytes(&_sk_guard.data).context("Invalid secret key")?;
+    let sk_ref = kem.secret_key_from_bytes(&sk_guard.data).context("Invalid secret key")?;
     let ct_ref = kem.ciphertext_from_bytes(&ciphertext_kem).context("Invalid ciphertext")?;
     let shared_secret = kem.decapsulate(sk_ref, ct_ref)?;
-    let _secret_guard = SensitiveData::new(shared_secret.into_vec());
+    let secret_guard = SensitiveData::new(shared_secret.into_vec());
 
-    let aes_key = derive_aes_key(&_secret_guard.data, &salt);
+    let aes_key = derive_aes_key(&secret_guard.data, &salt);
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
