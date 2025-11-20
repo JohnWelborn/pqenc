@@ -93,7 +93,14 @@ impl SensitiveData {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {:#}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // Handle compatibility flags mapping to commands
@@ -133,12 +140,10 @@ fn main() -> Result<()> {
 
 fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     if std::path::Path::new(public_key_path).exists() {
-        eprintln!("Error: Public key file already exists: {}", public_key_path);
-        std::process::exit(1);
+        bail!("Public key file already exists: {}", public_key_path);
     }
     if std::path::Path::new(private_key_path).exists() {
-        eprintln!("Error: Private key file already exists: {}", private_key_path);
-        std::process::exit(1);
+        bail!("Private key file already exists: {}", private_key_path);
     }
 
     let kem = Kem::new(KEM_ALGORITHM)?;
@@ -203,8 +208,7 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Nonce<U12> { // Using generic N
 
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     if std::path::Path::new(output_path).exists() {
-        eprintln!("Error: Output file already exists: {}", output_path);
-        std::process::exit(1);
+        bail!("Output file already exists: {}", output_path);
     }
 
     let pk_b64 = fs::read_to_string(public_key_path).context("Failed to read public key")?;
@@ -288,8 +292,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 
 fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
     if std::path::Path::new(output_path).exists() {
-        eprintln!("Error: Output file already exists: {}", output_path);
-        std::process::exit(1);
+        bail!("Output file already exists: {}", output_path);
     }
 
     let sk_b64 = fs::read_to_string(private_key_path).context("Failed to read private key")?;
@@ -301,8 +304,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
     if magic != MAGIC {
-        eprintln!("Error: Invalid file format or version");
-        std::process::exit(1);
+        bail!("Invalid file format or version");
     }
 
     let mut len_bytes = [0u8; 4];
@@ -372,13 +374,11 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
                 fout.write_all(&plaintext)?;
                 plaintext.zeroize();
             }
-            Err(_) => {
-                eprintln!("Error: Decryption failed (Integrity check failed)");
-                eprintln!("Possible causes: Wrong key, corrupted file, or truncation attack.");
+            Err(e) => {
                 // Delete partial output
                 drop(fout);
                 let _ = fs::remove_file(output_path);
-                std::process::exit(1);
+                bail!("Decryption failed (Integrity check failed): {:?}\nPossible causes: Wrong key, corrupted file, or truncation attack.", e);
             }
         }
         
