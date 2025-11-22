@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools cmake ninja-build clang pkg-config
+          sudo apt-get install -y musl-tools musl-dev cmake ninja-build clang pkg-config linux-headers-generic
 
       - name: Cache liboqs
         id: cache-liboqs
@@ -144,9 +144,9 @@ jobs:
           mkdir build && cd build
 
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
-            ARCH_FLAG="-arch arm64"
+            OSX_ARCH="arm64"
           else
-            ARCH_FLAG="-arch x86_64"
+            OSX_ARCH="x86_64"
           fi
 
           cmake -GNinja \
@@ -155,8 +155,8 @@ jobs:
             -DOQS_USE_OPENSSL=ON \
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
-            -DCMAKE_OSX_ARCHITECTURES=$(echo ${{ matrix.target }} | cut -d'-' -f1 | sed 's/aarch64/arm64/') \
-            -DCMAKE_C_FLAGS="${ARCH_FLAG}" \
+            -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
+            -DOQS_DIST_BUILD=OFF \
             ..
           ninja
           ninja install
@@ -215,6 +215,9 @@ jobs:
           toolchain: 1.82.0
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install dependencies
         run: |
           choco install ninja cmake -y
@@ -229,7 +232,6 @@ jobs:
 
       - name: Build OpenSSL static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
-        shell: cmd
         run: |
           curl -L https://www.openssl.org/source/openssl-3.0.15.tar.gz -o openssl.tar.gz
           tar xzf openssl.tar.gz
@@ -240,19 +242,12 @@ jobs:
 
       - name: Build liboqs static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
-        shell: cmd
         run: |
           git clone --depth 1 --branch ${{ env.LIBOQS_VERSION }} https://github.com/open-quantum-safe/liboqs.git
           cd liboqs
           mkdir build
           cd build
-          cmake -GNinja ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DBUILD_SHARED_LIBS=OFF ^
-            -DOQS_USE_OPENSSL=ON ^
-            -DOPENSSL_ROOT_DIR=C:\openssl-static ^
-            -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ^
-            ..
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOQS_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR=C:\openssl-static -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ..
           ninja
           ninja install
 
@@ -269,7 +264,6 @@ jobs:
           key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build binary
-        shell: cmd
         env:
           OPENSSL_STATIC: "1"
           OPENSSL_DIR: 'C:\openssl-static'
