@@ -72,13 +72,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
       - name: Cache Cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-git-${{ runner.os }}-
 
       - name: Build binary
         env:
@@ -167,13 +171,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
       - name: Cache Cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-git-${{ runner.os }}-
 
       - name: Build binary
         env:
@@ -257,13 +265,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
       - name: Cache Cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-git-${{ runner.os }}-
 
       - name: Build binary
         env:
