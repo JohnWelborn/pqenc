@@ -46,7 +46,7 @@ jobs:
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
           tar xzf openssl-3.0.15.tar.gz
           cd openssl-3.0.15
-          CC=musl-gcc ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
+          CC=musl-gcc CFLAGS="-I/usr/include" ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
           make -j$(nproc)
           make install_sw
 
@@ -157,6 +157,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
             -DOQS_DIST_BUILD=OFF \
+            -DOQS_USE_CPU_EXTENSIONS=OFF \
             ..
           ninja
           ninja install
@@ -247,7 +248,7 @@ jobs:
           cd liboqs
           mkdir build
           cd build
-          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOQS_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR=C:\openssl-static -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ..
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOQS_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR=C:\openssl-static -DCMAKE_INSTALL_PREFIX=C:\liboqs-install -DCMAKE_EXE_LINKER_FLAGS="ws2_32.lib" ..
           ninja
           ninja install
 
@@ -268,7 +269,7 @@ jobs:
           OPENSSL_STATIC: "1"
           OPENSSL_DIR: 'C:\openssl-static'
           OQS_DIR: 'C:\liboqs-install'
-          RUSTFLAGS: '-C target-feature=+crt-static -L C:\liboqs-install\lib'
+          RUSTFLAGS: '-C target-feature=+crt-static -L C:\liboqs-install\lib -L C:\openssl-static\lib -l ws2_32 -l advapi32 -l crypt32 -l user32'
         run: |
           cargo build --release --target x86_64-pc-windows-msvc
 
