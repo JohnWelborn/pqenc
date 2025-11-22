@@ -46,7 +46,7 @@ jobs:
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
           tar xzf openssl-3.0.15.tar.gz
           cd openssl-3.0.15
-          CC=musl-gcc ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
+          CC=musl-gcc CFLAGS="-I/usr/include" ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
           make -j$(nproc)
           make install_sw
 
