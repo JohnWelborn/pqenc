@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools musl-dev cmake ninja-build clang pkg-config linux-headers-generic
+          sudo apt-get install -y musl-tools musl-dev cmake ninja-build clang pkg-config linux-libc-dev
 
       - name: Cache liboqs
         id: cache-liboqs
@@ -46,8 +46,6 @@ jobs:
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
           tar xzf openssl-3.0.15.tar.gz
           cd openssl-3.0.15
-          # Patch to use sys/mman.h instead of linux/mman.h for musl
-          sed -i 's|#include <linux/mman.h>|#include <sys/mman.h>|g' crypto/mem_sec.c
           CC=musl-gcc ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
           make -j$(nproc)
           make install_sw
