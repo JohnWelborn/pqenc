@@ -218,6 +218,14 @@ class PostQuantumFileEncryption:
         next_chunk = None
 
         try:
+            # Check if input is a directory
+            if os.path.isdir(input_path):
+                dirname = os.path.basename(input_path.rstrip(os.sep)) or input_path
+                print(f"Error: Input file is a directory, not a file: {input_path}\n")
+                print("pqenc can only encrypt individual files. To encrypt a directory:")
+                print(f"tar czf - {dirname} | python pqenc.py --encrypt /dev/stdin --output {dirname}.tar.gz.pqe --public-key {public_key_path}")
+                sys.exit(1)
+
             if os.path.exists(output_path):
                 print(f"Error: Output file already exists: {output_path}")
                 sys.exit(1)
