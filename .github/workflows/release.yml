@@ -160,6 +160,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
             -DOQS_ENABLE_KEM_ml_kem_1024=ON \
             -DOQS_OPT_TARGET=generic \
+            -DCMAKE_C_FLAGS="-arch ${OSX_ARCH}" \
             ..
           ninja
           ninja install
