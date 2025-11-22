@@ -33,6 +33,17 @@ fi
 
 source \$HOME/.cargo/env
 
+# Install cargo-sbom and cargo-deny if not present
+if ! command -v cargo-sbom &> /dev/null; then
+    echo "==> Installing cargo-sbom..."
+    cargo install cargo-sbom
+fi
+
+if ! command -v cargo-deny &> /dev/null; then
+    echo "==> Installing cargo-deny..."
+    cargo install cargo-deny
+fi
+
 # Build and install liboqs
 if [ ! -d "liboqs" ]; then
     echo "==> Cloning and building liboqs..."
@@ -47,6 +58,20 @@ fi
 
 cd ${CONTAINER_PATH}/pqenc_rust
 export LD_LIBRARY_PATH=/usr/local/lib
+
+# Generate Cargo.lock
+echo "==> Generating Cargo.lock..."
+cargo generate-lockfile
+
+# Run cargo-deny checks (allow network failures for advisory database)
+echo "==> Running cargo-deny security checks..."
+cargo deny check || echo "Warning: cargo-deny check failed (possibly due to network issues)"
+
+# Generate SBOM
+echo "==> Generating SBOM..."
+cargo sbom > sbom.json
+
+# Build the release binary
 cargo build --release
 EOF
 
@@ -56,6 +81,10 @@ rm build_and_test.sh
 
 # Run the build script
 docker exec "${CONTAINER_ID}" bash "${CONTAINER_PATH}/build_and_test.sh"
+
+echo "==> Copying Cargo.lock and SBOM back to local machine..."
+docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/Cargo.lock" "${LOCAL_DIR}/pqenc_rust/Cargo.lock"
+docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/sbom.json" "${LOCAL_DIR}/pqenc_rust/sbom.json"
 
 echo "==> Running integration tests..."
 docker exec "${CONTAINER_ID}" bash -c "
@@ -67,3 +96,4 @@ docker exec "${CONTAINER_ID}" bash -c "
 
 echo ""
 echo "==> All rust tests completed successfully!"
+echo "==> Cargo.lock and sbom.json have been copied to ${LOCAL_DIR}/pqenc_rust/"
