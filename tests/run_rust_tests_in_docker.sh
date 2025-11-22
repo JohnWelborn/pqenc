@@ -7,16 +7,18 @@ set -e  # Exit on any error
 
 CONTAINER_ID="3b4a2936afac"
 CONTAINER_PATH="/opt/"
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # Go up to repo root
 
 echo "==> Copying Rust project to Docker container..."
 # Create directory if it doesn't exist (although we copy the folder)
 docker exec "${CONTAINER_ID}" mkdir -p "${CONTAINER_PATH}/pqenc_rust"
-docker cp "${LOCAL_DIR}/pqenc_rust/." "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/Cargo.toml" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/Cargo.lock" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/src" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
 
 echo "==> Copying test scripts..."
-docker cp "${LOCAL_DIR}/test_integration_rust.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_rust.py"
-docker cp "${LOCAL_DIR}/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
+docker cp "${LOCAL_DIR}/tests/rust/test_integration_rust.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_rust.py"
+docker cp "${LOCAL_DIR}/python-legacy/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
 
 echo "==> Installing dependencies and building Rust project..."
 # Use heredoc with quoted delimiter to prevent local expansion, except for variables we want to expand
@@ -83,8 +85,8 @@ rm build_and_test.sh
 docker exec "${CONTAINER_ID}" bash "${CONTAINER_PATH}/build_and_test.sh"
 
 echo "==> Copying Cargo.lock and SBOM back to local machine..."
-docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/Cargo.lock" "${LOCAL_DIR}/pqenc_rust/Cargo.lock"
-docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/sbom.json" "${LOCAL_DIR}/pqenc_rust/sbom.json"
+docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/Cargo.lock" "${LOCAL_DIR}/Cargo.lock"
+docker cp "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/sbom.json" "${LOCAL_DIR}/sbom.json"
 
 echo "==> Running integration tests..."
 docker exec "${CONTAINER_ID}" bash -c "
@@ -96,4 +98,4 @@ docker exec "${CONTAINER_ID}" bash -c "
 
 echo ""
 echo "==> All rust tests completed successfully!"
-echo "==> Cargo.lock and sbom.json have been copied to ${LOCAL_DIR}/pqenc_rust/"
+echo "==> Cargo.lock and sbom.json have been copied to ${LOCAL_DIR}/"
