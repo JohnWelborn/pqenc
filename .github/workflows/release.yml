@@ -145,10 +145,8 @@ jobs:
 
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
             OSX_ARCH="arm64"
-            CMAKE_SYSTEM_PROCESSOR="arm64"
           else
             OSX_ARCH="x86_64"
-            CMAKE_SYSTEM_PROCESSOR="x86_64"
           fi
 
           cmake -GNinja \
@@ -158,9 +156,7 @@ jobs:
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
-            -DCMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR} \
             -DOQS_ENABLE_KEM_ml_kem_1024=ON \
-            -DOQS_OPT_TARGET=generic \
             -DOQS_DIST_BUILD=ON \
             -DCMAKE_C_FLAGS="-arch ${OSX_ARCH}" \
             ..
