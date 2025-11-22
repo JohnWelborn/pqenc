@@ -1,0 +1,321 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (optional, defaults to latest commit)'
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBOQS_VERSION: "0.13.0"
+
+jobs:
+  build-linux:
+    name: Build Linux (x86_64 musl)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.82.0
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools cmake ninja-build clang pkg-config
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/liboqs-install
+          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: Build OpenSSL static
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
+          tar xzf openssl-3.0.15.tar.gz
+          cd openssl-3.0.15
+          CC=musl-gcc ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
+          make -j$(nproc)
+          make install_sw
+
+      - name: Build liboqs static
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ env.LIBOQS_VERSION }} https://github.com/open-quantum-safe/liboqs.git
+          cd liboqs
+          mkdir build && cd build
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOQS_USE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR=/tmp/openssl-musl \
+            -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
+            -DCMAKE_C_COMPILER=musl-gcc \
+            -DCMAKE_C_FLAGS="-static" \
+            ..
+          ninja
+          ninja install
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_DIR: /tmp/openssl-musl
+          OQS_DIR: /tmp/liboqs-install
+          PKG_CONFIG_ALL_STATIC: "1"
+          PKG_CONFIG_PATH: /tmp/liboqs-install/lib/pkgconfig:/tmp/openssl-musl/lib64/pkgconfig
+          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib -L /tmp/openssl-musl/lib64"
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Strip binary
+        run: |
+          strip target/x86_64-unknown-linux-musl/release/pqenc
+
+      - name: Create archive
+        run: |
+          cd target/x86_64-unknown-linux-musl/release
+          tar czf pqenc-linux-x86_64.tar.gz pqenc
+          sha256sum pqenc-linux-x86_64.tar.gz > pqenc-linux-x86_64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqenc-linux-x86_64
+          path: |
+            target/x86_64-unknown-linux-musl/release/pqenc-linux-x86_64.tar.gz
+            target/x86_64-unknown-linux-musl/release/pqenc-linux-x86_64.tar.gz.sha256
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.82.0
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja openssl@3
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/liboqs-install
+          key: liboqs-${{ env.LIBOQS_VERSION }}-${{ matrix.target }}-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: Build liboqs static
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ env.LIBOQS_VERSION }} https://github.com/open-quantum-safe/liboqs.git
+          cd liboqs
+          mkdir build && cd build
+
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            ARCH_FLAG="-arch arm64"
+          else
+            ARCH_FLAG="-arch x86_64"
+          fi
+
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOQS_USE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
+            -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
+            -DCMAKE_OSX_ARCHITECTURES=$(echo ${{ matrix.target }} | cut -d'-' -f1 | sed 's/aarch64/arm64/') \
+            -DCMAKE_C_FLAGS="${ARCH_FLAG}" \
+            ..
+          ninja
+          ninja install
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_DIR: /opt/homebrew/opt/openssl@3
+          OQS_DIR: /tmp/liboqs-install
+          PKG_CONFIG_PATH: /tmp/liboqs-install/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig
+          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib"
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          strip target/${{ matrix.target }}/release/pqenc
+
+      - name: Create archive
+        run: |
+          cd target/${{ matrix.target }}/release
+          ARCH=$(echo ${{ matrix.target }} | cut -d'-' -f1)
+          tar czf pqenc-macos-${ARCH}.tar.gz pqenc
+          shasum -a 256 pqenc-macos-${ARCH}.tar.gz > pqenc-macos-${ARCH}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqenc-macos-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/pqenc-macos-*.tar.gz
+            target/${{ matrix.target }}/release/pqenc-macos-*.tar.gz.sha256
+
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.82.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: |
+          choco install ninja cmake -y
+          choco install strawberryperl -y
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: C:\liboqs-install
+          key: liboqs-${{ env.LIBOQS_VERSION }}-windows-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: Build OpenSSL static
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          curl -L https://www.openssl.org/source/openssl-3.0.15.tar.gz -o openssl.tar.gz
+          tar xzf openssl.tar.gz
+          cd openssl-3.0.15
+          perl Configure VC-WIN64A no-shared --prefix=C:\openssl-static --openssldir=C:\openssl-static
+          nmake
+          nmake install
+
+      - name: Build liboqs static
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch ${{ env.LIBOQS_VERSION }} https://github.com/open-quantum-safe/liboqs.git
+          cd liboqs
+          mkdir build
+          cd build
+          cmake -GNinja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DOQS_USE_OPENSSL=ON ^
+            -DOPENSSL_ROOT_DIR=C:\openssl-static ^
+            -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ^
+            ..
+          ninja
+          ninja install
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: cargo-git-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build binary
+        shell: cmd
+        env:
+          OPENSSL_STATIC: "1"
+          OPENSSL_DIR: C:\openssl-static
+          OQS_DIR: C:\liboqs-install
+          RUSTFLAGS: "-C target-feature=+crt-static -L C:\liboqs-install\lib"
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Create archive
+        shell: pwsh
+        run: |
+          cd target\x86_64-pc-windows-msvc\release
+          Compress-Archive -Path pqenc.exe -DestinationPath pqenc-windows-x86_64.zip
+          (Get-FileHash pqenc-windows-x86_64.zip -Algorithm SHA256).Hash + "  pqenc-windows-x86_64.zip" | Out-File -Encoding ASCII pqenc-windows-x86_64.zip.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqenc-windows-x86_64
+          path: |
+            target/x86_64-pc-windows-msvc/release/pqenc-windows-x86_64.zip
+            target/x86_64-pc-windows-msvc/release/pqenc-windows-x86_64.zip.sha256
+
+  create-release:
+    name: Create Release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
