@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-v1
+          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-v2
 
       - name: Build OpenSSL static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -134,7 +134,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-${{ matrix.target }}-v1
+          key: liboqs-${{ env.LIBOQS_VERSION }}-${{ matrix.target }}-v2
 
       - name: Build liboqs static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -158,6 +158,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
             -DOQS_ENABLE_KEM_ml_kem_1024=ON \
             -DOQS_OPT_TARGET=generic \
+            -DOQS_DIST_BUILD=ON \
             -DCMAKE_C_FLAGS="-arch ${OSX_ARCH}" \
             ..
           ninja
