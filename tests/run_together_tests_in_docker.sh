@@ -7,7 +7,7 @@ set -e  # Exit on any error
 
 CONTAINER_ID="3b4a2936afac"
 CONTAINER_PATH="/opt/"
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # Go up to repo root
 
 echo "============================================================"
 echo "  Python ↔ Rust Interoperability Test Suite"
@@ -16,11 +16,13 @@ echo "============================================================"
 echo ""
 echo "==> Copying Rust project to Docker container..."
 docker exec "${CONTAINER_ID}" mkdir -p "${CONTAINER_PATH}/pqenc_rust"
-docker cp "${LOCAL_DIR}/pqenc_rust/." "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/Cargo.toml" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/Cargo.lock" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
+docker cp "${LOCAL_DIR}/src" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc_rust/"
 
 echo "==> Copying Python implementation and test scripts..."
-docker cp "${LOCAL_DIR}/test_integration_together.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_together.py"
-docker cp "${LOCAL_DIR}/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
+docker cp "${LOCAL_DIR}/tests/interop/test_integration_together.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_together.py"
+docker cp "${LOCAL_DIR}/python-legacy/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
 
 echo "==> Setting up build environment..."
 # Create build script

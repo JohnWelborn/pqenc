@@ -7,16 +7,16 @@ set -e  # Exit on any error
 
 CONTAINER_ID="3b4a2936afac"
 CONTAINER_PATH="/opt/"
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # Go up to repo root
 
 echo "==> Copying pqenc.py to Docker container..."
-docker cp "${LOCAL_DIR}/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
+docker cp "${LOCAL_DIR}/python-legacy/pqenc.py" "${CONTAINER_ID}:${CONTAINER_PATH}/pqenc.py"
 
 echo "==> Copying test_python.py to Docker container..."
-docker cp "${LOCAL_DIR}/test_python.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_python.py"
+docker cp "${LOCAL_DIR}/tests/python/test_python.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_python.py"
 
 echo "==> Copying test_integration_python.py to Docker container..."
-docker cp "${LOCAL_DIR}/test_integration_python.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_python.py"
+docker cp "${LOCAL_DIR}/tests/python/test_integration_python.py" "${CONTAINER_ID}:${CONTAINER_PATH}/test_integration_python.py"
 
 echo "==> Running unit tests in Docker container..."
 docker exec "${CONTAINER_ID}" bash -c "cd ${CONTAINER_PATH} && .venv/bin/pytest test_python.py -v"
