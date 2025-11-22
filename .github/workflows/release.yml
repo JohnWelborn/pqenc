@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-${{ hashFiles('.github/workflows/release.yml') }}
+          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-v1
 
       - name: Build OpenSSL static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -134,7 +134,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-${{ matrix.target }}-${{ hashFiles('.github/workflows/release.yml') }}
+          key: liboqs-${{ env.LIBOQS_VERSION }}-${{ matrix.target }}-v1
 
       - name: Build liboqs static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -228,7 +228,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-windows-${{ hashFiles('.github/workflows/release.yml') }}
+          key: liboqs-${{ env.LIBOQS_VERSION }}-windows-v1
 
       - name: Build OpenSSL static
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
