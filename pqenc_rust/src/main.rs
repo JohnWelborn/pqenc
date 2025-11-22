@@ -302,6 +302,18 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
 /// * `Ok(())` on success
 /// * `Err` if validation fails, encryption fails, or I/O errors occur
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
+    // Check if input is a directory
+    let input_p = std::path::Path::new(input_path);
+    if input_p.exists() && input_p.is_dir() {
+        let dirname = input_p.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
+        bail!(
+            "Input file is a directory, not a file: {}\n\n\
+            pqenc can only encrypt individual files. To encrypt a directory:\n\
+            tar czf - {} | pqenc --encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
+            input_path, dirname, dirname, public_key_path
+        );
+    }
+
     // Validate all paths
     validate_path(input_path, true, "Input file")?;
     validate_path(output_path, false, "Output file")?;
