@@ -46,7 +46,9 @@ jobs:
           wget https://www.openssl.org/source/openssl-3.0.15.tar.gz
           tar xzf openssl-3.0.15.tar.gz
           cd openssl-3.0.15
-          CC=musl-gcc CFLAGS="-I/usr/include" ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
+          # Patch to use sys/mman.h instead of linux/mman.h for musl
+          sed -i 's/#include <linux\/mman.h>/#include <sys\/mman.h>/' crypto/mem_sec.c
+          CC=musl-gcc ./config no-shared no-async --prefix=/tmp/openssl-musl --openssldir=/tmp/openssl-musl
           make -j$(nproc)
           make install_sw
 
@@ -156,8 +158,7 @@ jobs:
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_OSX_ARCHITECTURES=${OSX_ARCH} \
-            -DOQS_DIST_BUILD=OFF \
-            -DOQS_USE_CPU_EXTENSIONS=OFF \
+            -DOQS_MINIMAL_BUILD=ON \
             ..
           ninja
           ninja install
