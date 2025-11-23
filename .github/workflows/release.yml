@@ -90,14 +90,14 @@ jobs:
           targets: aarch64-apple-darwin
 
       - name: Install build dependencies
-        run: brew install cmake ninja
+        run: brew install cmake ninja openssl@3
 
       - name: Cache liboqs
         id: cache-liboqs
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-macos-arm64-v4-no-openssl
+          key: liboqs-${{ env.LIBOQS_VERSION }}-macos-arm64-v5-with-openssl
 
       - name: Build and install liboqs
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -108,7 +108,8 @@ jobs:
           cmake -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
-            -DOQS_USE_OPENSSL=OFF \
+            -DOQS_USE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DOQS_ENABLE_KEM_ml_kem_1024=ON \
@@ -119,11 +120,10 @@ jobs:
           ninja install
 
       - name: Build pqenc
-        env:
-          OQS_DIR: /tmp/liboqs-install
-          OQS_USE_OPENSSL: "0"
-          RUSTFLAGS: "-L /tmp/liboqs-install/lib"
         run: |
+          export OPENSSL_DIR=$(brew --prefix openssl@3)
+          export OQS_DIR=/tmp/liboqs-install
+          export RUSTFLAGS="-L /tmp/liboqs-install/lib -L $(brew --prefix openssl@3)/lib"
           cargo build --release --target aarch64-apple-darwin
 
       - name: Package binary
