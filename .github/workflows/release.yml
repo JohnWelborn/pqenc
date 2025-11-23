@@ -34,29 +34,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-v3
+          key: liboqs-${{ env.LIBOQS_VERSION }}-linux-musl-v4-no-openssl
 
       - name: Build and install liboqs
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
         run: |
-          # Build OpenSSL for musl
-          wget -q https://www.openssl.org/source/openssl-3.0.15.tar.gz
-          tar xzf openssl-3.0.15.tar.gz
-          cd openssl-3.0.15
-          CC=musl-gcc ./config no-shared --prefix=/tmp/openssl-musl
-          make -j$(nproc)
-          make install_sw
-          cd ..
-
-          # Build liboqs
           git clone --depth 1 --branch ${{ env.LIBOQS_VERSION }} https://github.com/open-quantum-safe/liboqs.git
           cd liboqs
           mkdir build && cd build
           cmake -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
-            -DOQS_USE_OPENSSL=ON \
-            -DOPENSSL_ROOT_DIR=/tmp/openssl-musl \
+            -DOQS_USE_OPENSSL=OFF \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_C_COMPILER=musl-gcc \
             -DCMAKE_C_FLAGS="-static" \
@@ -66,10 +55,8 @@ jobs:
 
       - name: Build pqenc
         env:
-          OPENSSL_STATIC: "1"
-          OPENSSL_DIR: /tmp/openssl-musl
           OQS_DIR: /tmp/liboqs-install
-          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib -L /tmp/openssl-musl/lib64"
+          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib"
         run: |
           cargo build --release --target x86_64-unknown-linux-musl
 
@@ -102,14 +89,14 @@ jobs:
           targets: aarch64-apple-darwin
 
       - name: Install build dependencies
-        run: brew install cmake ninja openssl@3
+        run: brew install cmake ninja
 
       - name: Cache liboqs
         id: cache-liboqs
         uses: actions/cache@v4
         with:
           path: /tmp/liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-macos-arm64-v3
+          key: liboqs-${{ env.LIBOQS_VERSION }}-macos-arm64-v4-no-openssl
 
       - name: Build and install liboqs
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -120,8 +107,7 @@ jobs:
           cmake -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
-            -DOQS_USE_OPENSSL=ON \
-            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
+            -DOQS_USE_OPENSSL=OFF \
             -DCMAKE_INSTALL_PREFIX=/tmp/liboqs-install \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DOQS_ENABLE_KEM_ml_kem_1024=ON \
@@ -132,13 +118,10 @@ jobs:
           ninja install
 
       - name: Build pqenc
+        env:
+          OQS_DIR: /tmp/liboqs-install
+          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib"
         run: |
-          OPENSSL_PREFIX=$(brew --prefix openssl@3)
-          export OPENSSL_STATIC=1
-          export OPENSSL_DIR=${OPENSSL_PREFIX}
-          export OQS_DIR=/tmp/liboqs-install
-          export PKG_CONFIG_PATH=/tmp/liboqs-install/lib/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig
-          export RUSTFLAGS="-C target-feature=+crt-static -L /tmp/liboqs-install/lib -L ${OPENSSL_PREFIX}/lib"
           cargo build --release --target aarch64-apple-darwin
 
       - name: Package binary
@@ -174,42 +157,32 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install build dependencies
-        run: choco install ninja cmake strawberryperl -y
+        run: choco install ninja cmake -y
 
       - name: Cache liboqs
         id: cache-liboqs
         uses: actions/cache@v4
         with:
           path: C:\liboqs-install
-          key: liboqs-${{ env.LIBOQS_VERSION }}-windows-v3
+          key: liboqs-${{ env.LIBOQS_VERSION }}-windows-v4-no-openssl
 
       - name: Build and install liboqs
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
         shell: cmd
         run: |
-          curl -L https://www.openssl.org/source/openssl-3.0.15.tar.gz -o openssl.tar.gz
-          tar xzf openssl.tar.gz
-          cd openssl-3.0.15
-          perl Configure VC-WIN64A no-shared --prefix=C:\openssl-static
-          nmake
-          nmake install
-          cd ..
-
           git clone --depth 1 --branch %LIBOQS_VERSION% https://github.com/open-quantum-safe/liboqs.git
           cd liboqs
           mkdir build
           cd build
-          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOQS_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR=C:\openssl-static -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ..
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOQS_USE_OPENSSL=OFF -DCMAKE_INSTALL_PREFIX=C:\liboqs-install ..
           ninja
           ninja install
 
       - name: Build pqenc
         shell: cmd
         env:
-          OPENSSL_STATIC: "1"
-          OPENSSL_DIR: C:\openssl-static
           OQS_DIR: C:\liboqs-install
-          RUSTFLAGS: -C target-feature=+crt-static -L C:\liboqs-install\lib -L C:\openssl-static\lib -l ws2_32 -l advapi32 -l crypt32 -l user32
+          RUSTFLAGS: -C target-feature=+crt-static -L C:\liboqs-install\lib -l ws2_32 -l advapi32 -l crypt32 -l user32
         run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Package binary
