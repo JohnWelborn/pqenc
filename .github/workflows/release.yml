@@ -132,13 +132,13 @@ jobs:
           ninja install
 
       - name: Build pqenc
-        env:
-          OPENSSL_STATIC: "1"
-          OPENSSL_DIR: ${{ env.HOMEBREW_PREFIX }}/opt/openssl@3
-          OQS_DIR: /tmp/liboqs-install
-          PKG_CONFIG_PATH: /tmp/liboqs-install/lib/pkgconfig:${{ env.HOMEBREW_PREFIX }}/opt/openssl@3/lib/pkgconfig
-          RUSTFLAGS: "-C target-feature=+crt-static -L /tmp/liboqs-install/lib"
         run: |
+          OPENSSL_PREFIX=$(brew --prefix openssl@3)
+          export OPENSSL_STATIC=1
+          export OPENSSL_DIR=${OPENSSL_PREFIX}
+          export OQS_DIR=/tmp/liboqs-install
+          export PKG_CONFIG_PATH=/tmp/liboqs-install/lib/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig
+          export RUSTFLAGS="-C target-feature=+crt-static -L /tmp/liboqs-install/lib -L ${OPENSSL_PREFIX}/lib"
           cargo build --release --target aarch64-apple-darwin
 
       - name: Package binary
