@@ -27,7 +27,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools cmake ninja-build clang
+          sudo apt-get install -y musl-tools cmake ninja-build clang pkg-config
 
       - name: Cache liboqs
         id: cache-liboqs
