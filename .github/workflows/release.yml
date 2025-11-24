@@ -51,6 +51,15 @@ jobs:
           ninja
           ninja install
 
+      - name: Debug liboqs installation
+        run: |
+          echo "=== Checking liboqs installation ==="
+          ls -la /tmp/liboqs-install/
+          ls -la /tmp/liboqs-install/lib/ || true
+          ls -la /tmp/liboqs-install/lib/pkgconfig/ || true
+          cat /tmp/liboqs-install/lib/pkgconfig/liboqs.pc || echo "liboqs.pc not found"
+          pkg-config --modversion liboqs || echo "pkg-config cannot find liboqs"
+
       - name: Build pqenc
         env:
           OQS_DIR: /tmp/liboqs-install
