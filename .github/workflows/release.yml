@@ -13,6 +13,7 @@ env:
 jobs:
   build-linux:
     name: Build Linux x86_64
+    if: false  # Disabled - uncomment to enable Linux builds
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
