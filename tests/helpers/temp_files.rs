@@ -10,8 +10,12 @@ pub struct TempTestEnv {
 
 impl TempTestEnv {
     pub fn new() -> Self {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir()
-            .join(format!("pqenc_test_{}", uuid::Uuid::new_v4()));
+            .join(format!("pqenc_test_{}", timestamp));
         fs::create_dir_all(&dir).unwrap();
 
         let pub_key_path = dir.join("test_pub.pem");
