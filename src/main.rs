@@ -332,10 +332,10 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let secret_guard = SensitiveData::new(shared_secret.into_vec());
 
     let mut salt = [0u8; SALT_SIZE];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
 
     let mut base_nonce = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut base_nonce);
+    rand::rng().fill_bytes(&mut base_nonce);
 
     let aes_key = derive_aes_key(&secret_guard.data, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);

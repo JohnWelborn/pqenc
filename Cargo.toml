@@ -3,6 +3,9 @@ name = "pqenc"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Post-quantum encryption tool using ML-KEM-1024 (Kyber) and AES-256-GCM"
+readme = "README.md"
+rust-version = "1.70"
 
 [dependencies]
 # ML-KEM-1024 (Kyber)
@@ -16,7 +19,7 @@ hkdf = "0.12.4"
 sha2 = "0.10.8"
 
 # Randomness
-rand = "0.8.5"
+rand = "0.9"
 
 # CLI
 clap = { version = "4.5.4", features = ["derive"] }
