@@ -61,50 +61,33 @@ const ARGON2_KEY_LENGTH: usize = 32;
 const PBE_NONCE_SIZE: usize = 12;
 
 // PEM headers
-const PEM_PUB_BEGIN: &str = "-----BEGIN PQENC HYBRID PUBLIC KEY-----";
-const PEM_PUB_END: &str = "-----END PQENC HYBRID PUBLIC KEY-----";
+const PEM_PUB_BEGIN: &str = "-----BEGIN PQENC PUBLIC KEY-----";
+const PEM_PUB_END: &str = "-----END PQENC PUBLIC KEY-----";
 const PEM_PRIV_ENC_BEGIN: &str = "-----BEGIN PQENC ENCRYPTED PRIVATE KEY-----";
 const PEM_PRIV_ENC_END: &str = "-----END PQENC ENCRYPTED PRIVATE KEY-----";
 
 #[derive(Parser)]
-#[command(name = "pqenc")]
-#[command(about = "Post-Quantum File Encryption Tool (ML-KEM-1024 + AES-256-GCM)", long_about = None)]
-#[command(after_help = "\
+#[command(
+    name = "pqenc",
+    about = "Post-Quantum File Encryption Tool (ML-KEM-1024 + AES-256-GCM)",
+    long_about = None,
+    subcommand_required = true,
+    arg_required_else_help = true,
+    after_help = "\
 Examples:
   # Generate a new keypair
-  pqenc --generate-keys --public-key pub.key --private-key priv.key
+  pqenc generate-keys --public-key pub.key --private-key priv.key
 
   # Encrypt a file
-  pqenc --encrypt secret.txt --output secret.enc --public-key pub.key
+  pqenc encrypt --encrypt secret.txt --output secret.enc --public-key pub.key
 
   # Decrypt a file
-  pqenc --decrypt secret.enc --output secret.txt --private-key priv.key
-")]
+  pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key
+"
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
-
-    // Flatten flags for compatibility with Python script's argparse style
-    // The Python script uses mutually exclusive flags --generate-keys, --encrypt, --decrypt
-    // Here we support both subcommands (cleaner) and flags (compat)
-    
-    #[arg(long, conflicts_with_all = ["encrypt", "decrypt"])]
-    generate_keys: bool,
-
-    #[arg(long, conflicts_with_all = ["generate_keys", "decrypt"])]
-    encrypt: Option<String>,
-
-    #[arg(long, conflicts_with_all = ["generate_keys", "encrypt"])]
-    decrypt: Option<String>,
-
-    #[arg(long)]
-    public_key: Option<String>,
-
-    #[arg(long)]
-    private_key: Option<String>,
-
-    #[arg(long)]
-    output: Option<String>,
+    command: Commands,
 }
 
 #[derive(Subcommand)]
@@ -116,7 +99,7 @@ enum Commands {
         private_key: String,
     },
     Encrypt {
-        #[arg(long)]
+        #[arg(long = "encrypt")]
         input: String,
         #[arg(long)]
         output: String,
@@ -124,7 +107,7 @@ enum Commands {
         public_key: String,
     },
     Decrypt {
-        #[arg(long)]
+        #[arg(long = "decrypt")]
         input: String,
         #[arg(long)]
         output: String,
@@ -323,35 +306,15 @@ fn validate_path(path: &str, must_exist: bool, description: &str) -> Result<()> 
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle compatibility flags mapping to commands
-    if cli.generate_keys {
-        let pub_path = cli.public_key.context("--generate-keys requires --public-key")?;
-        let priv_path = cli.private_key.context("--generate-keys requires --private-key")?;
-        generate_keys(&pub_path, &priv_path)?;
-    } else if let Some(input_path) = cli.encrypt {
-        let pub_path = cli.public_key.context("--encrypt requires --public-key")?;
-        let output_path = cli.output.context("--encrypt requires --output")?;
-        encrypt_file(&input_path, &output_path, &pub_path)?;
-    } else if let Some(input_path) = cli.decrypt {
-        let priv_path = cli.private_key.context("--decrypt requires --private-key")?;
-        let output_path = cli.output.context("--decrypt requires --output")?;
-        decrypt_file(&input_path, &output_path, &priv_path)?;
-    } else {
-        // Try subcommands
-        match cli.command {
-            Some(Commands::GenerateKeys { public_key, private_key }) => {
-                generate_keys(&public_key, &private_key)?;
-            }
-            Some(Commands::Encrypt { input, output, public_key }) => {
-                encrypt_file(&input, &output, &public_key)?;
-            }
-            Some(Commands::Decrypt { input, output, private_key }) => {
-                decrypt_file(&input, &output, &private_key)?;
-            }
-            None => {
-                use clap::CommandFactory;
-                Cli::command().print_help()?;
-            }
+    match cli.command {
+        Commands::GenerateKeys { public_key, private_key } => {
+            generate_keys(&public_key, &private_key)?;
+        }
+        Commands::Encrypt { input, output, public_key } => {
+            encrypt_file(&input, &output, &public_key)?;
+        }
+        Commands::Decrypt { input, output, private_key } => {
+            decrypt_file(&input, &output, &private_key)?;
         }
     }
 
