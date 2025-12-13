@@ -765,3 +765,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests;
