@@ -3,6 +3,7 @@ use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
 use std::io::Write;
+use std::time::Duration;
 
 fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
@@ -51,6 +52,8 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
     let temp_dir = std::env::temp_dir();
 
     let mut group = c.benchmark_group("encryption");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
 
     for size in [1024, 64*1024, 256*1024, 1024*1024].iter() {
         let data = vec![0u8; *size];
@@ -85,6 +88,8 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
     let temp_dir = std::env::temp_dir();
 
     let mut group = c.benchmark_group("decryption");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
 
     for size in [1024, 64*1024, 256*1024, 1024*1024].iter() {
         let data = vec![0u8; *size];
@@ -144,7 +149,11 @@ expect eof
 fn benchmark_key_generation(c: &mut Criterion) {
     let temp_dir = std::env::temp_dir();
 
-    c.bench_function("key_generation", |b| {
+    let mut group = c.benchmark_group("key_generation");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(22));
+
+    group.bench_function("key_generation", |b| {
         b.iter(|| {
             let pub_key = temp_dir.join(format!("keygen_pub_{}.pem", rand::random::<u32>()));
             let priv_key = temp_dir.join(format!("keygen_priv_{}.pem", rand::random::<u32>()));
@@ -183,6 +192,8 @@ expect eof
             let _ = fs::remove_file(&script_path);
         });
     });
+
+    group.finish();
 }
 
 criterion_group!(benches, benchmark_encryption_sizes, benchmark_decryption_sizes, benchmark_key_generation);
