@@ -49,6 +49,9 @@ proptest = "1.4"
 # Benchmarking
 criterion = "0.5"
 
+# UUID for test isolation
+uuid = { version = "1.6", features = ["v4"] }
+
 [[bench]]
 name = "crypto_bench"
 harness = false
