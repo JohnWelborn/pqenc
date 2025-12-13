@@ -1,12 +1,15 @@
 //! Post-Quantum File Encryption Tool
 //!
 //! Provides hybrid post-quantum encryption using ML-KEM-1024 (NIST FIPS 203)
-//! for key encapsulation and AES-256-GCM for symmetric encryption.
+//! for key encapsulation, X25519 for an additional DH secret, and AES-256-GCM
+//! for symmetric encryption. The AES key is HKDF-derived from the concatenation
+//! of the ML-KEM shared secret and the X25519 shared secret (with a salt).
 //!
 //! # Security Features
 //! - ML-KEM-1024: Post-quantum secure key encapsulation mechanism
+//! - X25519: Ephemeral-static Diffie-Hellman mixed with the KEM secret
+//! - HKDF-SHA256: Derives the AES-256 key from ML-KEM secret || X25519 secret
 //! - AES-256-GCM: Authenticated encryption with additional data
-//! - HKDF-SHA256: Cryptographic key derivation
 //! - Zeroization: Automatic clearing of sensitive data from memory
 //! - Chunked encryption: 64KB chunks with unique nonces and authentication
 //!
@@ -15,6 +18,7 @@
 //! [4 bytes: Magic "PQE1"]
 //! [4 bytes: KEM ciphertext length]
 //! [N bytes: KEM ciphertext]
+//! [32 bytes: ephemeral X25519 public key]
 //! [16 bytes: Salt for HKDF]
 //! [12 bytes: Base nonce]
 //! [Encrypted chunks with 16-byte authentication tags]
