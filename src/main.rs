@@ -10,6 +10,7 @@
 //! - X25519: Ephemeral-static Diffie-Hellman mixed with the KEM secret
 //! - HKDF-SHA256: Derives the AES-256 key from ML-KEM secret || X25519 secret
 //! - AES-256-GCM: Authenticated encryption with additional data
+//! - Context-binding AAD: Each chunk authenticated with chunk index and header hash
 //! - Zeroization: Automatic clearing of sensitive data from memory
 //! - Chunked encryption: 64KB chunks with unique nonces and authentication
 //!
@@ -48,8 +49,8 @@ const CHUNK_SIZE: usize = 64 * 1024;
 const TAG_SIZE: usize = 16;
 const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
 const MAGIC: &[u8] = b"PQE1";
-const AAD_CHUNK: &[u8] = b"\x00";
-const AAD_LAST_CHUNK: &[u8] = b"\x01";
+const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
+const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 
 // X25519 and hybrid constants
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
@@ -487,6 +488,24 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     Ok(*Nonce::from_slice(&nonce_bytes))
 }
 
+/// Builds Additional Authenticated Data (AAD) for AEAD encryption.
+///
+/// Binds the following context to each encrypted chunk:
+/// - chunk_type: 1 byte (0x00 for normal chunk, 0x01 for last chunk)
+/// - chunk_index: 8 bytes (u64 big-endian position)
+/// - header_hash: 32 bytes (SHA256 of file header)
+///
+/// This improves misuse resistance by cryptographically binding each chunk
+/// to its position and the encryption parameters, preventing chunk reordering,
+/// header substitution, and other format-level attacks.
+fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 41] {
+    let mut aad = [0u8; 41];
+    aad[0] = chunk_type;
+    aad[1..9].copy_from_slice(&chunk_index.to_be_bytes());
+    aad[9..41].copy_from_slice(header_hash);
+    aad
+}
+
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM.
 ///
 /// Performs hybrid post-quantum encryption:
@@ -569,15 +588,22 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         .open(output_path)
         .context("Failed to create output file (already exists or permission denied)")?;
 
-    // Write Header
-    fout.write_all(MAGIC)?;
-
+    // Build header and compute hash for AAD
     let kem_ct_len = kem_ciphertext.as_ref().len() as u32;
-    fout.write_all(&kem_ct_len.to_be_bytes())?;
-    fout.write_all(kem_ciphertext.as_ref())?;
-    fout.write_all(ephemeral_public.as_bytes())?;  // NEW: X25519 ephemeral public key
-    fout.write_all(&salt)?;
-    fout.write_all(&base_nonce)?;
+    let mut header = Vec::new();
+    header.extend_from_slice(MAGIC);
+    header.extend_from_slice(&kem_ct_len.to_be_bytes());
+    header.extend_from_slice(kem_ciphertext.as_ref());
+    header.extend_from_slice(ephemeral_public.as_bytes());
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&base_nonce);
+
+    // Compute header hash for AAD binding
+    use sha2::Digest;
+    let header_hash: [u8; 32] = Sha256::digest(&header).into();
+
+    // Write header to file
+    fout.write_all(&header)?;
 
 
     let mut chunk_index = 0;
@@ -590,12 +616,13 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     loop {
         let n_next = fin.read(&mut next_chunk)?;
 
-        let aad = if n_next == 0 { AAD_LAST_CHUNK } else { AAD_CHUNK };
+        let chunk_type = if n_next == 0 { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+        let aad = build_aad(chunk_type, chunk_index, &header_hash);
 
         let nonce = get_nonce(&base_nonce, chunk_index)?;
         let payload = Payload {
             msg: &current_chunk[..n_current],
-            aad,
+            aad: &aad,
         };
 
         let ciphertext = cipher.encrypt(&nonce, payload)
@@ -668,7 +695,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
 
-    // Read header
+    // Read and parse header
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
     if magic != MAGIC {
@@ -687,13 +714,26 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     fin.read_exact(&mut ciphertext_kem)?;
 
     let mut ephemeral_x25519_pk = [0u8; 32];
-    fin.read_exact(&mut ephemeral_x25519_pk)?;  // NEW: read ephemeral X25519 public key
+    fin.read_exact(&mut ephemeral_x25519_pk)?;
 
     let mut salt = [0u8; SALT_SIZE];
     fin.read_exact(&mut salt)?;
 
     let mut base_nonce = [0u8; NONCE_SIZE];
     fin.read_exact(&mut base_nonce)?;
+
+    // Reconstruct header for hash computation (must match encryption order)
+    let mut header = Vec::new();
+    header.extend_from_slice(&magic);
+    header.extend_from_slice(&len_bytes);
+    header.extend_from_slice(&ciphertext_kem);
+    header.extend_from_slice(&ephemeral_x25519_pk);
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&base_nonce);
+
+    // Compute header hash for AAD binding
+    use sha2::Digest;
+    let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     // Validate file contains encrypted data beyond the header
     let header_end_pos = fin.stream_position()?;
@@ -773,12 +813,13 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
             }
 
             let current_pos = fin.stream_position()?;
-            let aad = if current_pos == file_len { AAD_LAST_CHUNK } else { AAD_CHUNK };
+            let chunk_type = if current_pos == file_len { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+            let aad = build_aad(chunk_type, chunk_index, &header_hash);
 
             let nonce = get_nonce(&base_nonce, chunk_index)?;
             let payload = Payload {
                 msg: &buffer[..bytes_read],
-                aad,
+                aad: &aad,
             };
 
             let mut plaintext = cipher.decrypt(&nonce, payload)
