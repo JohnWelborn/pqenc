@@ -197,8 +197,8 @@
             let (parsed_mlkem, parsed_x25519) =
                 parse_private_composite_key(&composite).unwrap();
 
-            assert_eq!(parsed_mlkem, mlkem_sk);
-            assert_eq!(parsed_x25519, x25519_sk);
+            assert_eq!(parsed_mlkem.data, mlkem_sk);
+            assert_eq!(parsed_x25519.data.as_slice(), &x25519_sk);
         }
     }
 
