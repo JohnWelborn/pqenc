@@ -639,6 +639,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 /// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
 fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+    use rand::Rng;
 
     // Validate all paths
     validate_path(input_path, true, "Input file")?;
@@ -648,6 +649,9 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     if std::path::Path::new(output_path).exists() {
         bail!("Output file already exists: {}", output_path);
     }
+
+    // Generate temporary file path for atomic write
+    let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
 
     // Read and decrypt private key
     let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
@@ -718,7 +722,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     // Zeroize combined secret
     drop(combined_secret);
 
-    // Create output file with restrictive permissions (0o600 on Unix)
+    // Create temporary output file with restrictive permissions (0o600 on Unix)
     #[cfg(unix)]
     let mut fout = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -726,64 +730,79 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(output_path)
-            .context("Failed to create output file")?
+            .open(&temp_path)
+            .context("Failed to create temporary output file")?
     };
 
     #[cfg(not(unix))]
-    let mut fout = File::create(output_path).context("Failed to create output file")?;
+    let mut fout = File::create(&temp_path).context("Failed to create temporary output file")?;
 
-    let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
-    let mut chunk_index = 0;
-    
-    let file_len = fin.metadata()?.len();
+    // Perform decryption - any error will trigger cleanup of temp file
+    let decrypt_result = (|| -> Result<()> {
+        let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
+        let mut chunk_index = 0;
 
-    loop {
-        // Read up to encrypted_chunk_size.
-        // We loop to ensure we fill the buffer if possible, though for local files read() usually suffices.
-        let mut buffer = vec![0u8; encrypted_chunk_size];
-        let mut bytes_read = 0;
-        while bytes_read < encrypted_chunk_size {
-            let n = fin.read(&mut buffer[bytes_read..])?;
-            if n == 0 {
+        let file_len = fin.metadata()?.len();
+
+        loop {
+            // Read up to encrypted_chunk_size.
+            // We loop to ensure we fill the buffer if possible, though for local files read() usually suffices.
+            let mut buffer = vec![0u8; encrypted_chunk_size];
+            let mut bytes_read = 0;
+            while bytes_read < encrypted_chunk_size {
+                let n = fin.read(&mut buffer[bytes_read..])?;
+                if n == 0 {
+                    break;
+                }
+                bytes_read += n;
+            }
+
+
+            if bytes_read == 0 {
                 break;
             }
-            bytes_read += n;
-        }
-        
-        
-        if bytes_read == 0 {
-            break;
-        }
-        
-        let current_pos = fin.stream_position()?;
-        let aad = if current_pos == file_len { AAD_LAST_CHUNK } else { AAD_CHUNK };
 
-        let nonce = get_nonce(&base_nonce, chunk_index)?;
-        let payload = Payload {
-            msg: &buffer[..bytes_read],
-            aad,
-        };
-        
-        match cipher.decrypt(&nonce, payload) {
-            Ok(mut plaintext) => {
-                fout.write_all(&plaintext)?;
-                plaintext.zeroize();
-            }
-            Err(e) => {
-                // Delete partial output
-                drop(fout);
-                let _ = fs::remove_file(output_path);
-                bail!("Decryption failed (Integrity check failed): {:?}\nPossible causes: Wrong key, corrupted file, or truncation attack.", e);
-            }
+            let current_pos = fin.stream_position()?;
+            let aad = if current_pos == file_len { AAD_LAST_CHUNK } else { AAD_CHUNK };
+
+            let nonce = get_nonce(&base_nonce, chunk_index)?;
+            let payload = Payload {
+                msg: &buffer[..bytes_read],
+                aad,
+            };
+
+            let mut plaintext = cipher.decrypt(&nonce, payload)
+                .map_err(|e| anyhow::anyhow!(
+                    "Decryption failed (Integrity check failed): {:?}\n\
+                    Possible causes: Wrong key, corrupted file, or truncation attack.", e
+                ))?;
+
+            fout.write_all(&plaintext)?;
+            plaintext.zeroize();
+
+            chunk_index += 1;
         }
-        
-        chunk_index += 1;
+
+        Ok(())
+    })();
+
+    // Ensure file is closed before rename/delete
+    drop(fout);
+
+    // Handle result: atomic rename on success, cleanup on error
+    match decrypt_result {
+        Ok(_) => {
+            fs::rename(&temp_path, output_path)
+                .context("Failed to move decrypted file to final destination")?;
+            println!("File decrypted successfully: {}", output_path);
+            Ok(())
+        }
+        Err(e) => {
+            // Clean up temporary file on any error
+            let _ = fs::remove_file(&temp_path);
+            Err(e)
+        }
     }
-
-    println!("File decrypted successfully: {}", output_path);
-
-    Ok(())
 }
 
 
