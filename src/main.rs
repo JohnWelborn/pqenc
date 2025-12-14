@@ -260,7 +260,7 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
 }
 
 /// Parse composite private key: [4-byte len][ML-KEM sk][X25519 sk(32)]
-fn parse_private_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
+fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveData)> {
     if data.len() < 4 + X25519_PRIVATE_KEY_SIZE {
         bail!("Private key data too short");
     }
@@ -275,8 +275,8 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
         bail!("Invalid composite private key size");
     }
 
-    let mlkem_sk = data[4..4 + kem_len].to_vec();
-    let x25519_sk: [u8; 32] = data[4 + kem_len..].try_into().unwrap();
+    let mlkem_sk = SensitiveData::new(data[4..4 + kem_len].to_vec());
+    let x25519_sk = SensitiveData::new(data[4 + kem_len..].to_vec());
 
     Ok((mlkem_sk, x25519_sk))
 }
@@ -378,14 +378,18 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
 
     // Prompt for password
     eprintln!("Enter password for private key:");
-    let password1 = rpassword::read_password()?;
+    let mut password1 = rpassword::read_password()?;
     eprintln!("Confirm password:");
-    let password2 = rpassword::read_password()?;
+    let mut password2 = rpassword::read_password()?;
 
     if password1 != password2 {
+        password1.zeroize();
+        password2.zeroize();
         bail!("Passwords do not match");
     }
     if password1.is_empty() {
+        password1.zeroize();
+        password2.zeroize();
         bail!("Password cannot be empty");
     }
     if password1.len() < 12 {
@@ -399,8 +403,8 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     drop(mlkem_secret);
     drop(x25519_secret);
     composite_priv.zeroize();
-    drop(password1);
-    drop(password2);
+    password1.zeroize();
+    password2.zeroize();
 
     // Save as PEM
     let pem_pub = pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END);
@@ -658,8 +662,9 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
 
     eprintln!("Enter private key password:");
-    let password = rpassword::read_password()?;
+    let mut password = rpassword::read_password()?;
     let composite_priv = decrypt_private_key(&encrypted_blob, password.as_bytes())?;
+    password.zeroize();
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
@@ -700,13 +705,15 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     // ML-KEM decapsulation
     let kem = Kem::new(KEM_ALGORITHM)?;
-    let sk_ref = kem.secret_key_from_bytes(&mlkem_sk).context("Invalid ML-KEM secret key")?;
+    let sk_ref = kem.secret_key_from_bytes(&mlkem_sk.data).context("Invalid ML-KEM secret key")?;
     let ct_ref = kem.ciphertext_from_bytes(&ciphertext_kem).context("Invalid ciphertext")?;
     let shared_secret_kem = kem.decapsulate(sk_ref, ct_ref)?;
     let kem_secret_guard = SensitiveData::new(shared_secret_kem.into_vec());
 
     // X25519 exchange - recreate static secret from stored bytes
-    let x25519_private = StaticSecret::from(x25519_sk);
+    let x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid X25519 key size"))?;
+    let x25519_private = StaticSecret::from(x25519_sk_array);
     let ephemeral_public = X25519PublicKey::from(ephemeral_x25519_pk);
     let shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
 
@@ -720,7 +727,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let cipher = Aes256Gcm::new(key);
 
     // Zeroize combined secret
-    drop(combined_secret);
+    combined_secret.zeroize();
 
     // Create temporary output file with restrictive permissions (0o600 on Unix)
     #[cfg(unix)]
