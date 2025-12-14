@@ -132,6 +132,39 @@ impl SensitiveData {
     }
 }
 
+/// RAII guard for temporary files that ensures cleanup even on panic.
+///
+/// Automatically deletes the temporary file when dropped unless explicitly
+/// told to keep it (via `disarm()`). This prevents leaking sensitive plaintext
+/// in temporary files if decryption fails or panics.
+struct TempFileGuard {
+    path: Option<String>,
+}
+
+impl TempFileGuard {
+    fn new(path: String) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Disarm the guard to prevent deletion (call before successful rename)
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+
+    /// Get the path reference
+    fn path(&self) -> &str {
+        self.path.as_ref().expect("TempFileGuard already disarmed")
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Encode bytes as PEM with custom headers
 fn pem_encode(der_bytes: &[u8], begin: &str, end: &str) -> String {
     let b64 = BASE64_STANDARD.encode(der_bytes);
@@ -682,6 +715,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     // Generate temporary file path for atomic write
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
+    let mut temp_guard = TempFileGuard::new(temp_path);
 
     // Read and decrypt private key
     let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
@@ -776,7 +810,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temp_path)
+            .open(temp_guard.path())
             .context("Failed to create temporary output file")?
     };
 
@@ -784,7 +818,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let mut fout = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temp_path)
+        .open(temp_guard.path())
         .context("Failed to create temporary output file")?;
 
     // Perform decryption - any error will trigger cleanup of temp file
@@ -845,9 +879,13 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
         Ok(_) => {
             // Final check before rename to minimize TOCTOU window
             if std::path::Path::new(output_path).exists() {
-                let _ = fs::remove_file(&temp_path);
+                // Guard will clean up temp file automatically
                 bail!("Output file already exists: {}", output_path);
             }
+
+            // Disarm guard before rename to prevent deletion of successfully decrypted file
+            let temp_path = temp_guard.path().to_string();
+            temp_guard.disarm();
 
             fs::rename(&temp_path, output_path)
                 .context("Failed to move decrypted file to final destination")?;
@@ -855,8 +893,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
             Ok(())
         }
         Err(e) => {
-            // Clean up temporary file on any error
-            let _ = fs::remove_file(&temp_path);
+            // Guard will automatically clean up temp file on drop
             Err(e)
         }
     }
