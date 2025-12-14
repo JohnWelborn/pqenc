@@ -687,6 +687,13 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let mut base_nonce = [0u8; NONCE_SIZE];
     fin.read_exact(&mut base_nonce)?;
 
+    // Validate file contains encrypted data beyond the header
+    let header_end_pos = fin.stream_position()?;
+    let file_len = fin.metadata()?.len();
+    if file_len < header_end_pos + TAG_SIZE as u64 {
+        bail!("Invalid ciphertext: file too short. This may indicate file truncation or corruption.");
+    }
+
     // ML-KEM decapsulation
     let kem = Kem::new(KEM_ALGORITHM)?;
     let sk_ref = kem.secret_key_from_bytes(&mlkem_sk).context("Invalid ML-KEM secret key")?;
