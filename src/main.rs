@@ -345,13 +345,6 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     validate_path(public_key_path, false, "Public key")?;
     validate_path(private_key_path, false, "Private key")?;
 
-    if std::path::Path::new(public_key_path).exists() {
-        bail!("Public key file already exists: {}", public_key_path);
-    }
-    if std::path::Path::new(private_key_path).exists() {
-        bail!("Private key file already exists: {}", private_key_path);
-    }
-
     // Generate ML-KEM keypair
     let kem = Kem::new(KEM_ALGORITHM)?;
     let (mlkem_public, mlkem_secret) = kem.keypair()?;
@@ -410,7 +403,12 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let pem_pub = pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END);
     let pem_priv = pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END);
 
-    fs::write(public_key_path, pem_pub)?;
+    // Use create_new to atomically prevent TOCTOU/symlink attacks
+    let mut pub_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(public_key_path)?;
+    pub_file.write_all(pem_pub.as_bytes())?;
 
     // Write private key with atomic 0600 permissions
     #[cfg(unix)]
@@ -426,7 +424,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        let mut file = File::create(private_key_path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(private_key_path)?;
         file.write_all(pem_priv.as_bytes())?;
         let mut perms = file.metadata()?.permissions();
         perms.set_readonly(false);
@@ -523,10 +524,6 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     validate_path(output_path, false, "Output file")?;
     validate_path(public_key_path, true, "Public key")?;
 
-    if std::path::Path::new(output_path).exists() {
-        bail!("Output file already exists: {}", output_path);
-    }
-
     // Load PEM public key
     let pem_text = fs::read_to_string(public_key_path).context("Failed to read public key")?;
     let composite_bytes = pem_decode(&pem_text, PEM_PUB_BEGIN, PEM_PUB_END)?;
@@ -564,7 +561,13 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
     let input_size = fin.metadata()?.len();
-    let mut fout = File::create(output_path).context("Failed to create output file")?;
+
+    // Use create_new to atomically prevent TOCTOU/symlink attacks
+    let mut fout = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .context("Failed to create output file (already exists or permission denied)")?;
 
     // Write Header
     fout.write_all(MAGIC)?;
@@ -649,10 +652,6 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     validate_path(input_path, true, "Input file")?;
     validate_path(output_path, false, "Output file")?;
     validate_path(private_key_path, true, "Private key")?;
-
-    if std::path::Path::new(output_path).exists() {
-        bail!("Output file already exists: {}", output_path);
-    }
 
     // Generate temporary file path for atomic write
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
@@ -742,7 +741,11 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     };
 
     #[cfg(not(unix))]
-    let mut fout = File::create(&temp_path).context("Failed to create temporary output file")?;
+    let mut fout = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .context("Failed to create temporary output file")?;
 
     // Perform decryption - any error will trigger cleanup of temp file
     let decrypt_result = (|| -> Result<()> {
@@ -799,6 +802,12 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     // Handle result: atomic rename on success, cleanup on error
     match decrypt_result {
         Ok(_) => {
+            // Final check before rename to minimize TOCTOU window
+            if std::path::Path::new(output_path).exists() {
+                let _ = fs::remove_file(&temp_path);
+                bail!("Output file already exists: {}", output_path);
+            }
+
             fs::rename(&temp_path, output_path)
                 .context("Failed to move decrypted file to final destination")?;
             println!("File decrypted successfully: {}", output_path);
