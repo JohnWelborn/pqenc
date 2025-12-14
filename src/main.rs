@@ -718,6 +718,19 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     // Zeroize combined secret
     drop(combined_secret);
 
+    // Create output file with restrictive permissions (0o600 on Unix)
+    #[cfg(unix)]
+    let mut fout = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(output_path)
+            .context("Failed to create output file")?
+    };
+
+    #[cfg(not(unix))]
     let mut fout = File::create(output_path).context("Failed to create output file")?;
 
     let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
