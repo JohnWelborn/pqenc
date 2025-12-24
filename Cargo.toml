@@ -3,13 +3,13 @@ name = "pqenc"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Post-quantum encryption tool using ML-KEM-1024 (Kyber) and AES-256-GCM"
+description = "Post-quantum encryption tool using ML-KEM-1024 (FIPS 203) and AES-256-GCM"
 readme = "README.md"
 rust-version = "1.70"
 
 [dependencies]
-# ML-KEM-1024 (Kyber)
-oqs = { version = "0.11.0", features = ["kems"] }
+# ML-KEM-1024 (FIPS 203) - formally verified implementation
+libcrux-ml-kem = "0.0.4"
 
 # AES-256-GCM
 aes-gcm = "0.10.3"

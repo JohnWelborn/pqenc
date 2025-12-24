@@ -32,7 +32,7 @@ use aes_gcm::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hkdf::Hkdf;
-use oqs::kem::{Kem, Algorithm};
+use libcrux_ml_kem::mlkem1024;
 use rand::RngCore;
 use sha2::Sha256;
 use std::fs::{self, File};
@@ -41,7 +41,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use base64::prelude::*;
 
 // Constants
-const KEM_ALGORITHM: Algorithm = Algorithm::MlKem1024;
 const AES_KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
 const SALT_SIZE: usize = 16;
@@ -380,8 +379,12 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     validate_path(private_key_path, false, "Private key")?;
 
     // Generate ML-KEM keypair
-    let kem = Kem::new(KEM_ALGORITHM)?;
-    let (mlkem_public, mlkem_secret) = kem.keypair()?;
+    let mut key_gen_randomness = [0u8; 64];
+    rand::rng().fill_bytes(&mut key_gen_randomness);
+    let key_pair = mlkem1024::generate_key_pair(key_gen_randomness);
+    let mlkem_public = key_pair.public_key();
+    let mlkem_secret = key_pair.private_key();
+    key_gen_randomness.zeroize();
 
     // Generate X25519 keypair (static for long-term storage)
     let mut secret_bytes = [0u8; 32];
@@ -390,14 +393,14 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let x25519_public = X25519PublicKey::from(&x25519_secret);
 
     // Build composite public key: [4-byte len][ML-KEM pk][X25519 pk]
-    let mlkem_pk_bytes = mlkem_public.as_ref();
+    let mlkem_pk_bytes = mlkem_public.as_slice();
     let mut composite_pub = Vec::new();
     composite_pub.extend_from_slice(&(mlkem_pk_bytes.len() as u32).to_be_bytes());
     composite_pub.extend_from_slice(mlkem_pk_bytes);
     composite_pub.extend_from_slice(x25519_public.as_bytes());
 
     // Build composite private key: [4-byte len][ML-KEM sk][X25519 sk]
-    let mlkem_sk_bytes = mlkem_secret.as_ref();
+    let mlkem_sk_bytes = mlkem_secret.as_slice();
     let mut composite_priv = Vec::new();
     composite_priv.extend_from_slice(&(mlkem_sk_bytes.len() as u32).to_be_bytes());
     composite_priv.extend_from_slice(mlkem_sk_bytes);
@@ -427,7 +430,7 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let encrypted_priv = encrypt_private_key(&composite_priv, password1.as_bytes())?;
 
     // Zeroize sensitive data
-    drop(mlkem_secret);
+    drop(key_pair);  // Drop the keypair (contains both public and private keys)
     drop(x25519_secret);
     composite_priv.zeroize();
     password1.zeroize();
@@ -582,10 +585,19 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let (mlkem_pk, x25519_pk) = parse_public_composite_key(&composite_bytes)?;
 
     // ML-KEM encapsulation
-    let kem = Kem::new(KEM_ALGORITHM)?;
-    let pk_ref = kem.public_key_from_bytes(&mlkem_pk).context("Invalid ML-KEM public key")?;
-    let (kem_ciphertext, shared_secret_kem) = kem.encapsulate(pk_ref)?;
-    let kem_secret_guard = SensitiveData::new(shared_secret_kem.into_vec());
+    let mut encaps_randomness = [0u8; 32];
+    rand::rng().fill_bytes(&mut encaps_randomness);
+
+    // Deserialize public key (1568 bytes for ML-KEM-1024)
+    let mlkem_pk_array: [u8; 1568] = mlkem_pk.as_slice()
+        .try_into()
+        .context("Invalid ML-KEM public key size")?;
+    let public_key = mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array);
+
+    // Encapsulate
+    let (ciphertext, shared_secret) = mlkem1024::encapsulate(&public_key, encaps_randomness);
+    encaps_randomness.zeroize();
+    let kem_secret_guard = SensitiveData::new(shared_secret.to_vec());
 
     // X25519 exchange (ephemeral for one-time use)
     let ephemeral_secret = EphemeralSecret::random();
@@ -622,11 +634,11 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         .context("Failed to create output file (already exists or permission denied)")?;
 
     // Build header and compute hash for AAD
-    let kem_ct_len = kem_ciphertext.as_ref().len() as u32;
+    let kem_ct_len = ciphertext.as_slice().len() as u32;
     let mut header = Vec::new();
     header.extend_from_slice(MAGIC);
     header.extend_from_slice(&kem_ct_len.to_be_bytes());
-    header.extend_from_slice(kem_ciphertext.as_ref());
+    header.extend_from_slice(ciphertext.as_slice());
     header.extend_from_slice(ephemeral_public.as_bytes());
     header.extend_from_slice(&salt);
     header.extend_from_slice(&base_nonce);
@@ -777,11 +789,21 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     }
 
     // ML-KEM decapsulation
-    let kem = Kem::new(KEM_ALGORITHM)?;
-    let sk_ref = kem.secret_key_from_bytes(&mlkem_sk.data).context("Invalid ML-KEM secret key")?;
-    let ct_ref = kem.ciphertext_from_bytes(&ciphertext_kem).context("Invalid ciphertext")?;
-    let shared_secret_kem = kem.decapsulate(sk_ref, ct_ref)?;
-    let kem_secret_guard = SensitiveData::new(shared_secret_kem.into_vec());
+    // Deserialize private key (3168 bytes for ML-KEM-1024)
+    let mlkem_sk_array: [u8; 3168] = mlkem_sk.data.as_slice()
+        .try_into()
+        .context("Invalid ML-KEM secret key size")?;
+    let private_key = mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array);
+
+    // Deserialize ciphertext (1568 bytes)
+    let ciphertext_array: [u8; 1568] = ciphertext_kem.as_slice()
+        .try_into()
+        .context("Invalid ciphertext size")?;
+    let ciphertext = mlkem1024::MlKem1024Ciphertext::from(ciphertext_array);
+
+    // Decapsulate (always succeeds per FIPS 203)
+    let shared_secret = mlkem1024::decapsulate(&private_key, &ciphertext);
+    let kem_secret_guard = SensitiveData::new(shared_secret.to_vec());
 
     // X25519 exchange - recreate static secret from stored bytes
     let x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()

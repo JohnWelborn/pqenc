@@ -1,50 +1,21 @@
 # pqenc
 
-Post-quantum encryption tool using ML-KEM-1024 (Kyber) and AES-256-GCM.
+Post-quantum encryption tool using ML-KEM-1024 (FIPS 203) and AES-256-GCM with formally verified cryptography.
+
+## Features
+
+- **ML-KEM-1024** (NIST FIPS 203) - Post-quantum key encapsulation mechanism
+- **X25519** - Hybrid classical key exchange for defense in depth
+- **AES-256-GCM** - Authenticated encryption with additional data
+- **Formally verified** - Uses libcrux, a formally verified cryptography library
+- **Pure Rust** - No C dependencies required
 
 ## Building
 
 ### Prerequisites
 
-This project requires OpenSSL 3.x for the liboqs dependency.
-
-#### macOS
-
-If you built OpenSSL from source (recommended for LTS version 3.5.4):
-
-```bash
-# Download and build OpenSSL 3.5.4 (LTS)
-curl -O https://www.openssl.org/source/openssl-3.5.4.tar.gz
-tar -xzf openssl-3.5.4.tar.gz
-cd openssl-3.5.4
-
-# Configure and install to /usr/local/openssl
-./config --prefix=/usr/local/openssl --openssldir=/usr/local/openssl
-make
-sudo make install
-```
-
-The `.cargo/config.toml` file is already configured to use OpenSSL at `/usr/local/openssl`.
-
-If you installed OpenSSL to a different location, update `.cargo/config.toml` with the correct paths.
-
-#### Alternative: Using Homebrew
-
-```bash
-brew install openssl@3 pkg-config
-```
-
-Then update `.cargo/config.toml`:
-```toml
-[env]
-PKG_CONFIG_PATH = { value = "", relative = true, force = true }
-```
-
-And build with:
-```bash
-export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
-cargo build --release
-```
+- Rust 1.70 or later
+- No external dependencies required (pure Rust implementation)
 
 ### Build Commands
 
