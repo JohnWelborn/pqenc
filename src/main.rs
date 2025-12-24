@@ -607,6 +607,10 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let recipient_public = X25519PublicKey::from(x25519_pk);
     let mut shared_secret_x25519 = ephemeral_secret.diffie_hellman(&recipient_public);
 
+    if shared_secret_x25519.as_bytes() == &[0u8; 32] {
+        bail!("X25519 key exchange failed: invalid public key (low-order point detected)");
+    }
+
     // Combine secrets (64 bytes)
     let mut combined_secret = Vec::with_capacity(SHARED_SECRET_SIZE);
     combined_secret.extend_from_slice(kem_secret_guard.data.as_slice());
@@ -816,6 +820,10 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     x25519_sk_array.zeroize();
     let ephemeral_public = X25519PublicKey::from(ephemeral_x25519_pk);
     let mut shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
+
+    if shared_secret_x25519.as_bytes() == &[0u8; 32] {
+        bail!("X25519 key exchange failed: invalid ephemeral public key (low-order point detected)");
+    }
 
     // Combine secrets
     let mut combined_secret = Vec::with_capacity(SHARED_SECRET_SIZE);
