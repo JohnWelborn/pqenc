@@ -1,22 +1,4 @@
 # Cargo configuration for pqenc
 #
-# This file sets environment variables for the build process,
-# particularly for linking against OpenSSL 3.x which is required by liboqs.
-
-[env]
-# Point to OpenSSL 3.5.4 LTS installation
-OPENSSL_DIR = "/usr/local/openssl"
-OPENSSL_LIB_DIR = "/usr/local/openssl/lib"
-OPENSSL_INCLUDE_DIR = "/usr/local/openssl/include"
-PKG_CONFIG_PATH = "/usr/local/openssl/lib/pkgconfig"
-
-# If you installed OpenSSL elsewhere, update the paths above.
-# For Homebrew installations, comment out the above and use:
-# PKG_CONFIG_PATH = { value = "", relative = true, force = true }
-# Then run: export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
-
-[target.aarch64-apple-darwin]
-rustflags = ["-L", "/usr/local/openssl/lib"]
-
-[target.x86_64-apple-darwin]
-rustflags = ["-L", "/usr/local/openssl/lib"]
+# No special configuration required - libcrux is a pure Rust implementation
+# with no external C dependencies.
