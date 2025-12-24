@@ -24,6 +24,12 @@
 //! [12 bytes: Base nonce]
 //! [Encrypted chunks with 16-byte authentication tags]
 //! ```
+//!
+//! # Accepted Risks
+//! - AES-GCM integrity guarantees degrade beyond ~64 GiB per file due to birthday-bound
+//!   limits on the authentication polynomial. Beyond this limit, attackers with significant
+//!   resources may have increased (though still negligible) success forging authentication
+//!   tags to modify ciphertext undetected. Encryption remains strong.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
