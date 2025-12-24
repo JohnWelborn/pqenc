@@ -390,6 +390,7 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let mut secret_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut secret_bytes);
     let x25519_secret = StaticSecret::from(secret_bytes);
+    secret_bytes.zeroize();
     let x25519_public = X25519PublicKey::from(&x25519_secret);
 
     // Build composite public key: [4-byte len][ML-KEM pk][X25519 pk]
@@ -595,20 +596,22 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let public_key = mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array);
 
     // Encapsulate
-    let (ciphertext, shared_secret) = mlkem1024::encapsulate(&public_key, encaps_randomness);
+    let (ciphertext, mut shared_secret) = mlkem1024::encapsulate(&public_key, encaps_randomness);
     encaps_randomness.zeroize();
     let kem_secret_guard = SensitiveData::new(shared_secret.to_vec());
+    shared_secret.zeroize();
 
     // X25519 exchange (ephemeral for one-time use)
     let ephemeral_secret = EphemeralSecret::random();
     let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
     let recipient_public = X25519PublicKey::from(x25519_pk);
-    let shared_secret_x25519 = ephemeral_secret.diffie_hellman(&recipient_public);
+    let mut shared_secret_x25519 = ephemeral_secret.diffie_hellman(&recipient_public);
 
     // Combine secrets (64 bytes)
     let mut combined_secret = Vec::with_capacity(SHARED_SECRET_SIZE);
     combined_secret.extend_from_slice(kem_secret_guard.data.as_slice());
     combined_secret.extend_from_slice(shared_secret_x25519.as_bytes());
+    shared_secret_x25519.zeroize();
 
     let mut salt = [0u8; SALT_SIZE];
     rand::rng().fill_bytes(&mut salt);
@@ -802,20 +805,23 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let ciphertext = mlkem1024::MlKem1024Ciphertext::from(ciphertext_array);
 
     // Decapsulate (always succeeds per FIPS 203)
-    let shared_secret = mlkem1024::decapsulate(&private_key, &ciphertext);
+    let mut shared_secret = mlkem1024::decapsulate(&private_key, &ciphertext);
     let kem_secret_guard = SensitiveData::new(shared_secret.to_vec());
+    shared_secret.zeroize();
 
     // X25519 exchange - recreate static secret from stored bytes
-    let x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()
+    let mut x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()
         .map_err(|_| anyhow::anyhow!("Invalid X25519 key size"))?;
     let x25519_private = StaticSecret::from(x25519_sk_array);
+    x25519_sk_array.zeroize();
     let ephemeral_public = X25519PublicKey::from(ephemeral_x25519_pk);
-    let shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
+    let mut shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
 
     // Combine secrets
     let mut combined_secret = Vec::with_capacity(SHARED_SECRET_SIZE);
     combined_secret.extend_from_slice(kem_secret_guard.data.as_slice());
     combined_secret.extend_from_slice(shared_secret_x25519.as_bytes());
+    shared_secret_x25519.zeroize();
 
     let aes_key = derive_aes_key(&combined_secret, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);

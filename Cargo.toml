@@ -34,7 +34,7 @@ anyhow = "1.0.82"
 zeroize = { version = "1.7.0", features = ["derive"] }
 
 # X25519 key exchange (with static_secrets feature for serializable keys)
-x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom", "zeroize"] }
 
 # Password-based key derivation
 argon2 = { version = "0.5", features = ["std"] }
