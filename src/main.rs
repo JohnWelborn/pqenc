@@ -117,7 +117,7 @@ enum Commands {
         public_key: String,
     },
     Decrypt {
-        #[arg(long = "decrypt")]
+        #[arg(long = "decrypt", help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
         input: String,
         #[arg(long)]
         output: String,
@@ -875,7 +875,9 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
         let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
         let mut chunk_index = 0;
 
-        let file_len = fin.metadata()?.len();
+        let file_len = fin.metadata()
+            .context("Failed to get file metadata - decryption requires a seekable input file, not stdin or a pipe")?
+            .len();
 
         loop {
             // Read up to encrypted_chunk_size.
