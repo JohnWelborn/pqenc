@@ -434,14 +434,17 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     }
 
     // Encrypt private key
-    let encrypted_priv = encrypt_private_key(&composite_priv, password1.as_bytes())?;
+    let encrypted_priv = {
+        let result = encrypt_private_key(&composite_priv, password1.as_bytes());
+        password1.zeroize();
+        password2.zeroize();
+        result?
+    };
 
     // Zeroize sensitive data
-    drop(key_pair);  // Drop the keypair (contains both public and private keys)
+    drop(key_pair);
     drop(x25519_secret);
     composite_priv.zeroize();
-    password1.zeroize();
-    password2.zeroize();
 
     // Save as PEM
     let pem_pub = pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END);
@@ -748,8 +751,11 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     eprintln!("Enter private key password:");
     let mut password = rpassword::read_password()?;
-    let composite_priv = decrypt_private_key(&encrypted_blob, password.as_bytes())?;
-    password.zeroize();
+    let composite_priv = {
+        let result = decrypt_private_key(&encrypted_blob, password.as_bytes());
+        password.zeroize();
+        result?
+    };
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
@@ -803,10 +809,11 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
 
     // ML-KEM decapsulation
     // Deserialize private key (3168 bytes for ML-KEM-1024)
-    let mlkem_sk_array: [u8; 3168] = mlkem_sk.data.as_slice()
+    let mut mlkem_sk_array: [u8; 3168] = mlkem_sk.data.as_slice()
         .try_into()
         .context("Invalid ML-KEM secret key size")?;
     let private_key = mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array);
+    mlkem_sk_array.zeroize();
 
     // Deserialize ciphertext (1568 bytes)
     let ciphertext_array: [u8; 1568] = ciphertext_kem.as_slice()
