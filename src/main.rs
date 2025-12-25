@@ -522,9 +522,11 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
         base_nonce[8], base_nonce[9], base_nonce[10], base_nonce[11],
     ]);
 
-    // Use checked_add to detect overflow - critical for AES-GCM security
-    let new_int = base_int.checked_add(counter as u128)
-        .ok_or_else(|| anyhow::anyhow!("Nonce counter overflow - file too large"))?;
+    // Add counter and check for 96-bit overflow (critical for AES-GCM nonce uniqueness)
+    let new_int = base_int + counter as u128;
+    if new_int >> 96 != 0 {
+        bail!("Nonce counter overflow - file too large");
+    }
 
     let bytes = new_int.to_be_bytes();
     // Take last 12 bytes
