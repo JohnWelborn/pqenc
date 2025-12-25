@@ -91,6 +91,12 @@ Examples:
   # Encrypt a file
   pqenc encrypt --encrypt secret.txt --output secret.enc --public-key pub.key
 
+  # Encrypt from stdin (e.g., piped tar archive)
+  tar czf - mydir | pqenc encrypt --encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
+
+  # Encrypt from stdin using '-' shorthand
+  cat secret.txt | pqenc encrypt --encrypt - --output secret.enc --public-key pub.key
+
   # Decrypt a file
   pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key
 "
@@ -327,10 +333,26 @@ fn main() {
     }
 }
 
+/// Checks if a path refers to stdin (supports both "-" and "/dev/stdin" conventions)
+fn is_stdin_path(path: &str) -> bool {
+    path == "-" || path == "/dev/stdin"
+}
+
 /// Validates a file path for basic sanity checks.
-fn validate_path(path: &str, must_exist: bool, description: &str) -> Result<()> {
+///
+/// # Arguments
+/// * `path` - The path to validate
+/// * `must_exist` - Whether the file must exist
+/// * `allow_stdin` - Whether to allow stdin paths ("-" or "/dev/stdin")
+/// * `description` - Description for error messages
+fn validate_path(path: &str, must_exist: bool, allow_stdin: bool, description: &str) -> Result<()> {
     if path.is_empty() {
         bail!("{} path cannot be empty", description);
+    }
+
+    // Allow stdin paths if requested
+    if allow_stdin && is_stdin_path(path) {
+        return Ok(());
     }
 
     let p = std::path::Path::new(path);
@@ -344,6 +366,15 @@ fn validate_path(path: &str, must_exist: bool, description: &str) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Opens input for reading - either a file or stdin
+fn open_input(path: &str) -> Result<Box<dyn Read>> {
+    if is_stdin_path(path) {
+        Ok(Box::new(std::io::stdin()))
+    } else {
+        Ok(Box::new(File::open(path).context("Failed to open input file")?))
+    }
 }
 
 fn run() -> Result<()> {
@@ -381,8 +412,8 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
     // Validate paths
-    validate_path(public_key_path, false, "Public key")?;
-    validate_path(private_key_path, false, "Private key")?;
+    validate_path(public_key_path, false, false, "Public key")?;
+    validate_path(private_key_path, false, false, "Private key")?;
 
     // Generate ML-KEM keypair
     let mut key_gen_randomness = [0u8; 64];
@@ -574,22 +605,26 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, EphemeralSecret};
 
-    // Check if input is a directory
-    let input_p = std::path::Path::new(input_path);
-    if input_p.exists() && input_p.is_dir() {
-        let dirname = input_p.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
-        bail!(
-            "Input file is a directory, not a file: {}\n\n\
-            pqenc can only encrypt individual files. To encrypt a directory:\n\
-            tar czf - {} | pqenc --encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
-            input_path, dirname, dirname, public_key_path
-        );
+    let is_stdin = is_stdin_path(input_path);
+
+    // Check if input is a directory (skip for stdin)
+    if !is_stdin {
+        let input_p = std::path::Path::new(input_path);
+        if input_p.exists() && input_p.is_dir() {
+            let dirname = input_p.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
+            bail!(
+                "Input file is a directory, not a file: {}\n\n\
+                pqenc can only encrypt individual files. To encrypt a directory:\n\
+                tar czf - {} | pqenc encrypt --encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
+                input_path, dirname, dirname, public_key_path
+            );
+        }
     }
 
-    // Validate all paths
-    validate_path(input_path, true, "Input file")?;
-    validate_path(output_path, false, "Output file")?;
-    validate_path(public_key_path, true, "Public key")?;
+    // Validate all paths (allow stdin for input)
+    validate_path(input_path, true, true, "Input file")?;
+    validate_path(output_path, false, false, "Output file")?;
+    validate_path(public_key_path, true, false, "Public key")?;
 
     // Load PEM public key
     let pem_text = fs::read_to_string(public_key_path).context("Failed to read public key")?;
@@ -641,8 +676,12 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // Zeroize combined secret
     combined_secret.zeroize();
 
-    let mut fin = File::open(input_path).context("Failed to open input file")?;
-    let input_size = fin.metadata()?.len();
+    let mut fin = open_input(input_path)?;
+    let input_size = if is_stdin {
+        None
+    } else {
+        Some(File::open(input_path)?.metadata()?.len())
+    };
 
     // Use create_new to atomically prevent TOCTOU/symlink attacks
     let mut fout = fs::OpenOptions::new()
@@ -674,10 +713,27 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // Allocate buffers once and reuse them
     let mut current_chunk = vec![0u8; CHUNK_SIZE];
     let mut next_chunk = vec![0u8; CHUNK_SIZE];
-    let mut n_current = fin.read(&mut current_chunk)?;
+
+    // Read first chunk - loop to fill buffer completely (or until EOF)
+    let mut n_current = 0;
+    while n_current < CHUNK_SIZE {
+        let n = fin.read(&mut current_chunk[n_current..])?;
+        if n == 0 {
+            break;
+        }
+        n_current += n;
+    }
 
     loop {
-        let n_next = fin.read(&mut next_chunk)?;
+        // Read next chunk - loop to fill buffer completely (or until EOF)
+        let mut n_next = 0;
+        while n_next < CHUNK_SIZE {
+            let n = fin.read(&mut next_chunk[n_next..])?;
+            if n == 0 {
+                break;
+            }
+            n_next += n;
+        }
 
         let chunk_type = if n_next == 0 { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
         let aad = build_aad(chunk_type, chunk_index, &header_hash);
@@ -708,7 +764,11 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     }
 
     println!("File encrypted successfully");
-    println!("  Input:  {} ({} bytes)", input_path, input_size);
+    if let Some(size) = input_size {
+        println!("  Input:  {} ({} bytes)", input_path, size);
+    } else {
+        println!("  Input:  {} (stdin)", input_path);
+    }
     println!("  Output: {}", output_path);
     println!("  Using:  ML-KEM-1024 + X25519 + AES-256-GCM");
 
@@ -738,10 +798,15 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
     use rand::Rng;
 
-    // Validate all paths
-    validate_path(input_path, true, "Input file")?;
-    validate_path(output_path, false, "Output file")?;
-    validate_path(private_key_path, true, "Private key")?;
+    // Validate all paths (stdin not supported for decryption - requires seekable input)
+    validate_path(input_path, true, false, "Input file")?;
+    validate_path(output_path, false, false, "Output file")?;
+    validate_path(private_key_path, true, false, "Private key")?;
+    let input_meta = fs::metadata(input_path)
+        .context("Failed to read input file metadata")?;
+    if !input_meta.is_file() {
+        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+    }
 
     // Generate temporary file path for atomic write
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
