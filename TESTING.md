@@ -1,6 +1,6 @@
 # Testing Guide
 
-This project includes a comprehensive test suite with 39 tests covering unit, integration, security, and property-based testing.
+This project includes a comprehensive test suite with 41 tests covering unit, integration, security, property-based, and CLI testing.
 
 ## Quick Start
 
@@ -23,6 +23,9 @@ cargo test --test security_tests
 
 # Property-based tests only (3 tests - randomized inputs)
 cargo test --test property_tests
+
+# CLI tests only (2 tests - directory encryption via tar piping, Unix only)
+cargo test --test cli_encrypt_dir
 ```
 
 ## Run Tests with Output
@@ -70,6 +73,11 @@ Tests attack resistance and security properties:
 - Invalid magic bytes rejection
 - Header tampering detection
 - Ciphertext tampering detection
+
+### CLI Tests (2 tests in `tests/cli_encrypt_dir.rs`)
+Tests directory encryption via tar piping (Unix only):
+- Encrypt a directory using `tar czf - dir | pqenc encrypt --encrypt /dev/stdin`
+- Encrypt a directory using the `-` stdin shorthand
 
 ### Property-Based Tests (3 tests in `tests/property_tests.rs`)
 Tests with randomized inputs using proptest:
