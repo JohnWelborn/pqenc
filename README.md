@@ -27,8 +27,8 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 
 ```bash
 pqenc generate-keys -p pub.key -s priv.key
-pqenc encrypt -i secret.txt -o secret.txt.pqe -p pub.key
-pqenc decrypt -i secret.txt.pqe -o secret.txt -s priv.key
+pqenc encrypt -p pub.key -i secret.txt -o secret.txt.pqe
+pqenc decrypt -s priv.key -i secret.txt.pqe -o secret.txt
 ```
 
 ## Typical Workflow
@@ -45,16 +45,16 @@ Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine tha
 
 ```bash
 # Encrypt a single file
-pqenc encrypt --encrypt data.tar.gz --output data.tar.gz.pqe --public-key pub.key
+pqenc encrypt --public-key pub.key --encrypt data.tar.gz --output data.tar.gz.pqe
 
 # Encrypt a directory without writing plaintext to disk
-tar czf - /path/to/data | pqenc encrypt --encrypt - --output backup.tar.gz.pqe --public-key pub.key
+tar czf - /path/to/data | pqenc encrypt --public-key pub.key --encrypt - --output backup.tar.gz.pqe
 ```
 
 ### 3. Decrypt to restore (only when needed, using the private key)
 
 ```bash
-pqenc decrypt --decrypt backup.tar.gz.pqe --output backup.tar.gz --private-key priv.key
+pqenc decrypt --private-key priv.key --decrypt backup.tar.gz.pqe --output backup.tar.gz
 ```
 
 If preferred, decryption can be performed on an offline or air-gapped machine by transferring the encrypted file there.
