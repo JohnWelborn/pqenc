@@ -15,7 +15,7 @@ Post-quantum encryption tool using ML-KEM-1024 (FIPS 203) and AES-256-GCM with f
 ### Prerequisites
 
 - Rust 1.70 or later
-- No external dependencies required (pure Rust implementation)
+- No system dependencies required — all cryptographic primitives are pure Rust crates
 
 ### Build Commands
 
