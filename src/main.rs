@@ -39,7 +39,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hkdf::Hkdf;
 use libcrux_ml_kem::mlkem1024;
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use std::fs::{self, File};
 use std::io::{Read, Write, Seek};
@@ -232,7 +232,7 @@ fn derive_key_from_password(password: &[u8], salt: &[u8]) -> Result<SensitiveDat
 
 /// Encrypt composite private key with password
 fn encrypt_private_key(composite_key: &[u8], password: &[u8]) -> Result<Vec<u8>> {
-    use rand::Rng;
+    use rand::RngExt;
 
     let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
     let key = derive_key_from_password(password, &salt)?;
@@ -796,7 +796,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 /// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
 fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-    use rand::Rng;
+    use rand::RngExt;
 
     // Validate all paths (stdin not supported for decryption - requires seekable input)
     validate_path(input_path, true, false, "Input file")?;

@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 
 #[allow(dead_code)]
 pub struct TestData {
