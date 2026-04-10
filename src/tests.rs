@@ -277,11 +277,11 @@
 
         #[test]
         fn test_get_nonce_large_values() {
-            // Test that large but valid values work
-            let base = [0xFF; NONCE_SIZE];
+            // Test that large but valid values work: zero base nonce leaves full
+            // 96-bit range available, so u64::MAX fits without overflow
+            let base = [0u8; NONCE_SIZE];
             let huge = u64::MAX;
 
-            // This should succeed because u128 can hold this
             let result = get_nonce(&base, huge);
             assert!(result.is_ok());
         }
