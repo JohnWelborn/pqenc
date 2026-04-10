@@ -109,25 +109,25 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     GenerateKeys {
-        #[arg(long)]
+        #[arg(long, short = 'p')]
         public_key: String,
-        #[arg(long)]
+        #[arg(long, short = 's')]
         private_key: String,
     },
     Encrypt {
-        #[arg(long = "encrypt")]
+        #[arg(long = "encrypt", short = 'i')]
         input: String,
-        #[arg(long)]
+        #[arg(long, short = 'o')]
         output: String,
-        #[arg(long)]
+        #[arg(long, short = 'p')]
         public_key: String,
     },
     Decrypt {
-        #[arg(long = "decrypt", help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
+        #[arg(long = "decrypt", short = 'i', help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
         input: String,
-        #[arg(long)]
+        #[arg(long, short = 'o')]
         output: String,
-        #[arg(long)]
+        #[arg(long, short = 's')]
         private_key: String,
     },
 }

@@ -23,6 +23,14 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
 
+## Quick Start
+
+```bash
+pqenc generate-keys -p pub.key -s priv.key
+pqenc encrypt -i secret.txt -o secret.txt.pqe -p pub.key
+pqenc decrypt -i secret.txt.pqe -o secret.txt -s priv.key
+```
+
 ## Typical Workflow
 
 ### 1. Generate a keypair (once, on a secure machine)
