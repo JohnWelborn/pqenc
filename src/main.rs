@@ -182,7 +182,7 @@ fn pem_encode(der_bytes: &[u8], begin: &str, end: &str) -> String {
     let lines: Vec<String> = b64
         .as_bytes()
         .chunks(64)
-        .map(|chunk| String::from_utf8(chunk.to_vec()).unwrap())
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
         .collect();
     format!("{}\n{}\n{}\n", begin, lines.join("\n"), end)
 }
@@ -288,7 +288,9 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
         bail!("Public key data too short");
     }
 
-    let kem_len = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+    let kem_len = u32::from_be_bytes(
+        data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read public key length field"))?
+    ) as usize;
     if kem_len == 0 || kem_len > 8000 {
         bail!("Invalid ML-KEM public key length");
     }
@@ -299,7 +301,8 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     }
 
     let mlkem_pk = data[4..4 + kem_len].to_vec();
-    let x25519_pk: [u8; 32] = data[4 + kem_len..].try_into().unwrap();
+    let x25519_pk: [u8; 32] = data[4 + kem_len..].try_into()
+        .map_err(|_| anyhow::anyhow!("Failed to extract X25519 public key bytes"))?;
 
     Ok((mlkem_pk, x25519_pk))
 }
@@ -310,7 +313,9 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveD
         bail!("Private key data too short");
     }
 
-    let kem_len = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+    let kem_len = u32::from_be_bytes(
+        data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read private key length field"))?
+    ) as usize;
     if kem_len == 0 || kem_len > 10000 {
         bail!("Invalid ML-KEM private key length");
     }
@@ -808,6 +813,29 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
         bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
     }
 
+    // Atomically claim the output path before any decryption work begins.
+    // Using create_new(true) anchors on a file descriptor rather than checking
+    // existence separately, eliminating the check-then-rename TOCTOU window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(output_path)
+            .context("Output file already exists or cannot be created")?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_path)
+            .context("Output file already exists or cannot be created")?;
+    }
+    let mut output_guard = TempFileGuard::new(output_path.to_string());
+
     // Generate temporary file path for atomic write
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
     let mut temp_guard = TempFileGuard::new(temp_path);
@@ -992,28 +1020,17 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     // Ensure file is closed before rename/delete
     drop(fout);
 
-    // Handle result: atomic rename on success, cleanup on error
     match decrypt_result {
         Ok(_) => {
-            // Final check before rename to minimize TOCTOU window
-            if std::path::Path::new(output_path).exists() {
-                // Guard will clean up temp file automatically
-                bail!("Output file already exists: {}", output_path);
-            }
-
-            // Disarm guard before rename to prevent deletion of successfully decrypted file
             let temp_path = temp_guard.path().to_string();
-            temp_guard.disarm();
-
             fs::rename(&temp_path, output_path)
                 .context("Failed to move decrypted file to final destination")?;
+            temp_guard.disarm();
+            output_guard.disarm();
             println!("File decrypted successfully: {}", output_path);
             Ok(())
         }
-        Err(e) => {
-            // Guard will automatically clean up temp file on drop
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
