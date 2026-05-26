@@ -2,6 +2,10 @@
 
 Post-quantum encryption tool using ML-KEM-1024 (NIST FIPS 203) and AES-256-GCM with formally verified cryptography.
 
+## Disclaimer
+
+This repository was built as an exercise in AI-assisted coding.
+
 ## Overview
 
 pqenc is designed for encrypting backups and archives using asymmetric encryption, so that the machine doing the encrypting never needs access to the private key.
