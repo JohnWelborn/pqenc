@@ -834,7 +834,6 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
             .open(output_path)
             .context("Output file already exists or cannot be created")?;
     }
-    // Guard deletes the empty placeholder if decryption fails before the rename.
     let mut output_guard = TempFileGuard::new(output_path.to_string());
 
     // Generate temporary file path for atomic write
@@ -1021,24 +1020,17 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     // Ensure file is closed before rename/delete
     drop(fout);
 
-    // Handle result: atomic rename on success, cleanup on error.
-    // output_guard deletes the empty placeholder on failure; temp_guard deletes
-    // the incomplete temp file. Both are disarmed on success before the rename.
     match decrypt_result {
         Ok(_) => {
             let temp_path = temp_guard.path().to_string();
-            temp_guard.disarm();
-            output_guard.disarm();
-
             fs::rename(&temp_path, output_path)
                 .context("Failed to move decrypted file to final destination")?;
+            temp_guard.disarm();
+            output_guard.disarm();
             println!("File decrypted successfully: {}", output_path);
             Ok(())
         }
-        Err(e) => {
-            // Both guards clean up their respective files on drop.
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
