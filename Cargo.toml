@@ -49,11 +49,8 @@ proptest = "1.11"
 # Benchmarking
 criterion = "0.8"
 
-# Temporary directories for file tests
+# Temporary directories for test isolation
 tempfile = "3.27"
-
-# UUID generation for unique test directories
-uuid = { version = "1.23", features = ["v4"] }
 
 [[bench]]
 name = "crypto_bench"

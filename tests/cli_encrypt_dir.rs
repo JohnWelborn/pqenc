@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use uuid::Uuid;
+use tempfile::TempDir;
 
 const TEST_PASSWORD: &str = "test-tar-password";
 
@@ -67,27 +67,27 @@ fn test_encrypt_directory_via_tar_command() {
         return;
     }
 
-    let temp_root = std::env::temp_dir().join(format!("pqenc-test-{}", Uuid::new_v4()));
+    let temp_root = TempDir::new().unwrap();
     let dir_name = "data";
-    let dir_path = temp_root.join(dir_name);
+    let dir_path = temp_root.path().join(dir_name);
     fs::create_dir_all(&dir_path).unwrap();
 
     let test_content = b"hello world";
     let test_file = "file.txt";
     fs::write(dir_path.join(test_file), test_content).unwrap();
 
-    let public_key_path = temp_root.join("pub.key");
-    let private_key_path = temp_root.join("priv.key");
-    generate_keys_with_password(&temp_root, &public_key_path, &private_key_path);
+    let public_key_path = temp_root.path().join("pub.key");
+    let private_key_path = temp_root.path().join("priv.key");
+    generate_keys_with_password(temp_root.path(), &public_key_path, &private_key_path);
 
-    let encrypted_path = temp_root.join("archive.tar.gz.pqe");
+    let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_pqenc").to_string());
 
     // Encrypt: tar czf - data | pqenc encrypt
     let mut tar = Command::new("tar")
         .args(["czf", "-", dir_name])
-        .current_dir(&temp_root)
+        .current_dir(temp_root.path())
         .stdout(Stdio::piped())
         .spawn()
         .expect("Failed to spawn tar");
@@ -122,11 +122,11 @@ fn test_encrypt_directory_via_tar_command() {
     drop(file);
 
     // Decrypt: pqenc decrypt | tar xzf -
-    let extract_dir = temp_root.join("extracted");
+    let extract_dir = temp_root.path().join("extracted");
     fs::create_dir(&extract_dir).unwrap();
 
     // Create expect script for decryption that pipes to tar
-    let decrypted_tar_path = temp_root.join("decrypted.tar.gz");
+    let decrypted_tar_path = temp_root.path().join("decrypted.tar.gz");
     let decrypt_script = format!(r#"#!/usr/bin/expect -f
 set timeout 10
 spawn {} decrypt --decrypt {} --output {} --private-key {}
@@ -137,7 +137,7 @@ lassign [wait] pid spawnid os_error_flag value
 exit $value
 "#, pqenc_bin, encrypted_path.display(), decrypted_tar_path.display(), private_key_path.display(), TEST_PASSWORD);
 
-    let decrypt_script_path = temp_root.join("decrypt.exp");
+    let decrypt_script_path = temp_root.path().join("decrypt.exp");
     let mut file = fs::File::create(&decrypt_script_path).unwrap();
     file.write_all(decrypt_script.as_bytes()).unwrap();
 
@@ -170,7 +170,6 @@ exit $value
     let extracted_content = fs::read(&extracted_file).unwrap();
     assert_eq!(extracted_content, test_content, "Decrypted content doesn't match original");
 
-    let _ = fs::remove_dir_all(&temp_root);
 }
 
 #[test]
@@ -198,27 +197,27 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
         return;
     }
 
-    let temp_root = std::env::temp_dir().join(format!("pqenc-test-{}", Uuid::new_v4()));
+    let temp_root = TempDir::new().unwrap();
     let dir_name = "data";
-    let dir_path = temp_root.join(dir_name);
+    let dir_path = temp_root.path().join(dir_name);
     fs::create_dir_all(&dir_path).unwrap();
 
     let test_content = b"stdin shorthand test";
     let test_file = "file.txt";
     fs::write(dir_path.join(test_file), test_content).unwrap();
 
-    let public_key_path = temp_root.join("pub.key");
-    let private_key_path = temp_root.join("priv.key");
-    generate_keys_with_password(&temp_root, &public_key_path, &private_key_path);
+    let public_key_path = temp_root.path().join("pub.key");
+    let private_key_path = temp_root.path().join("priv.key");
+    generate_keys_with_password(temp_root.path(), &public_key_path, &private_key_path);
 
-    let encrypted_path = temp_root.join("archive.tar.gz.pqe");
+    let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_pqenc").to_string());
 
     // Encrypt using "-" as stdin shorthand instead of "/dev/stdin"
     let mut tar = Command::new("tar")
         .args(["czf", "-", dir_name])
-        .current_dir(&temp_root)
+        .current_dir(temp_root.path())
         .stdout(Stdio::piped())
         .spawn()
         .expect("Failed to spawn tar");
@@ -246,7 +245,7 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
     assert!(enc_status.success(), "pqenc encrypt failed");
 
     // Decrypt and verify
-    let decrypted_tar_path = temp_root.join("decrypted.tar.gz");
+    let decrypted_tar_path = temp_root.path().join("decrypted.tar.gz");
     let decrypt_script = format!(r#"#!/usr/bin/expect -f
 set timeout 10
 spawn {} decrypt --decrypt {} --output {} --private-key {}
@@ -257,7 +256,7 @@ lassign [wait] pid spawnid os_error_flag value
 exit $value
 "#, pqenc_bin, encrypted_path.display(), decrypted_tar_path.display(), private_key_path.display(), TEST_PASSWORD);
 
-    let decrypt_script_path = temp_root.join("decrypt.exp");
+    let decrypt_script_path = temp_root.path().join("decrypt.exp");
     let mut file = fs::File::create(&decrypt_script_path).unwrap();
     file.write_all(decrypt_script.as_bytes()).unwrap();
 
@@ -276,7 +275,7 @@ exit $value
     assert!(decrypt_output.status.success(), "pqenc decrypt failed: {}",
             String::from_utf8_lossy(&decrypt_output.stderr));
 
-    let extract_dir = temp_root.join("extracted");
+    let extract_dir = temp_root.path().join("extracted");
     fs::create_dir(&extract_dir).unwrap();
 
     let untar_status = Command::new("tar")
@@ -290,5 +289,4 @@ exit $value
     let extracted_content = fs::read(extract_dir.join(dir_name).join(test_file)).unwrap();
     assert_eq!(extracted_content, test_content, "Decrypted content doesn't match original");
 
-    let _ = fs::remove_dir_all(&temp_root);
 }
