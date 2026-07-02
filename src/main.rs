@@ -176,6 +176,26 @@ impl Drop for TempFileGuard {
     }
 }
 
+/// Fsync the directory containing `path`. Syncing a file's data does not
+/// guarantee the directory entry pointing to it survives a crash (relevant
+/// both for newly-created files and for renames) — the directory itself
+/// needs a separate fsync.
+#[cfg(unix)]
+fn sync_parent_dir(path: &str) -> Result<()> {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .context("Failed to sync directory to disk")
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &str) -> Result<()> {
+    Ok(())
+}
+
 /// Encode bytes as PEM with custom headers
 fn pem_encode(der_bytes: &[u8], begin: &str, end: &str) -> String {
     let b64 = BASE64_STANDARD.encode(der_bytes);
@@ -768,6 +788,9 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         n_current = n_next;
     }
 
+    fout.sync_all().context("Failed to sync output file to disk")?;
+    sync_parent_dir(output_path).context("Failed to sync output directory to disk")?;
+
     println!("File encrypted successfully");
     if let Some(size) = input_size {
         println!("  Input:  {} ({} bytes)", input_path, size);
@@ -1017,6 +1040,12 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
         Ok(())
     })();
 
+    // Sync temp file contents to disk before considering decryption successful,
+    // so a crash right after this call can't leave a truncated "success" output.
+    let decrypt_result = decrypt_result.and_then(|_| {
+        fout.sync_all().context("Failed to sync decrypted temp file to disk")
+    });
+
     // Ensure file is closed before rename/delete
     drop(fout);
 
@@ -1027,6 +1056,8 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
                 .context("Failed to move decrypted file to final destination")?;
             temp_guard.disarm();
             output_guard.disarm();
+            sync_parent_dir(output_path)
+                .context("Failed to sync directory after rename; decrypted output may not survive a crash")?;
             println!("File decrypted successfully: {}", output_path);
             Ok(())
         }
