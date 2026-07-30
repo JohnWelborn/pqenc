@@ -374,3 +374,206 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     assert_eq!(temp_bytes.get(..4), Some(&b"PQE1"[..]),
                "Temp file should hold the real output stream");
 }
+
+/// Run `generate-keys` with stdin closed. Only for checks that must fail
+/// *before* the password prompt — reaching the prompt with no stdin produces an
+/// unrelated read error, which would make a test pass for the wrong reason.
+fn run_generate_keys(pub_path: &std::path::Path, priv_path: &std::path::Path)
+    -> std::process::Output
+{
+    Command::new(pqenc_binary())
+        .args(&["generate-keys",
+            "--public-key", pub_path.to_str().unwrap(),
+            "--private-key", priv_path.to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// Run `generate-keys` through `expect`, supplying the password, so execution
+/// reaches the file writes. Required by any test about write behavior.
+#[cfg(unix)]
+fn run_generate_keys_answering_prompts(
+    env: &TempTestEnv,
+    pub_path: &std::path::Path,
+    priv_path: &std::path::Path,
+    script_name: &str,
+) -> std::process::Output {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = format!(r#"#!/usr/bin/expect -f
+set timeout 30
+spawn {} generate-keys --public-key {} --private-key {}
+expect "Enter password for private key:"
+send "{}\r"
+expect "Confirm password:"
+send "{}\r"
+expect eof
+lassign [wait] pid spawnid os_error_flag value
+exit $value
+"#, pqenc_binary(), pub_path.display(), priv_path.display(), TEST_PASSWORD, TEST_PASSWORD);
+
+    let script_path = env.file_path(script_name);
+    let mut file = fs::File::create(&script_path).unwrap();
+    file.write_all(script.as_bytes()).unwrap();
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    Command::new(&script_path).output().unwrap()
+}
+
+#[test]
+fn test_generate_keys_rejects_occupied_path_before_prompting() {
+    const SENTINEL: &[u8] = b"an existing key file that must not be touched";
+
+    // Occupied public key path.
+    let env = TempTestEnv::new();
+    let occupied = env.create_file("existing_pub.key", SENTINEL);
+    let fresh = env.file_path("fresh_priv.key");
+
+    let output = run_generate_keys(&occupied, &fresh);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(!output.status.success(), "Keygen must refuse an occupied path");
+    assert!(stderr.contains("already exists"),
+            "Error should name the conflict, got: {}", stderr);
+    // The whole point of the advisory pre-check: fail before spending ~1-2s on
+    // key generation and making the user type a password twice.
+    assert!(!stderr.contains("Enter password for private key:"),
+            "Keygen prompted for a password before detecting the conflict: {}", stderr);
+    assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
+    assert!(!fresh.exists(), "Nothing should have been written to the other path");
+
+    // Occupied private key path.
+    let env = TempTestEnv::new();
+    let fresh = env.file_path("fresh_pub.key");
+    let occupied = env.create_file("existing_priv.key", SENTINEL);
+
+    let output = run_generate_keys(&fresh, &occupied);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(!output.status.success(), "Keygen must refuse an occupied path");
+    assert!(!stderr.contains("Enter password for private key:"),
+            "Keygen prompted before detecting the conflict: {}", stderr);
+    assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
+    assert!(!fresh.exists(), "Nothing should have been written to the other path");
+}
+
+#[test]
+fn test_generate_keys_rejects_identical_paths() {
+    let env = TempTestEnv::new();
+    let same = env.file_path("same.key");
+
+    let output = run_generate_keys(&same, &same);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(!output.status.success(),
+            "Keygen must refuse to write both keys to one path");
+    // Assert the specific diagnosis, not merely that something failed: with no
+    // stdin, reaching the password prompt also fails, which would let this pass
+    // for an unrelated reason.
+    assert!(stderr.contains("must differ"),
+            "Error should name the identical-path conflict, got: {}", stderr);
+    assert!(!same.exists(), "No file should have been created");
+}
+
+/// Regression test for the stranded-public-key trap.
+///
+/// The public key used to be written first, so a failure on the private key
+/// left a public key whose private half never existed — everything encrypted to
+/// it would be unrecoverable. Triggering that needs a failure the advisory
+/// pre-check cannot see, so the private key targets a read-only directory.
+#[cfg(unix)]
+#[test]
+fn test_generate_keys_leaves_no_public_key_when_private_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TempTestEnv::new();
+    let locked_dir = env.file_path("locked");
+    fs::create_dir(&locked_dir).unwrap();
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    // root ignores the write bit, so the failure we depend on would not happen.
+    if fs::write(locked_dir.join(".probe"), b"x").is_ok() {
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("skipping: running with privileges that bypass directory permissions");
+        return;
+    }
+
+    let pub_path = env.file_path("stranded_pub.key");
+    let priv_path = locked_dir.join("priv.key");
+
+    // Must answer the prompts: the failure under test happens at the file
+    // writes, which are only reached after the password is accepted.
+    let output = run_generate_keys_answering_prompts(
+        &env, &pub_path, &priv_path, "stranded_keygen.exp");
+
+    // Restore before asserting so a failure cannot leave an undeletable TempDir.
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(!output.status.success(), "Keygen should have failed");
+    assert!(!priv_path.exists(), "Private key should not exist");
+    assert!(!pub_path.exists(),
+            "Public key was left behind after the private key write failed - \
+             it would encrypt to a private key that never existed");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_generate_keys_key_file_permissions() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TempTestEnv::new();
+    let pub_path = env.file_path("perm_pub.key");
+    let priv_path = env.file_path("perm_priv.key");
+    let script_path = env.file_path("perm_keygen.exp");
+
+    let script = format!(r#"#!/usr/bin/expect -f
+set timeout 30
+spawn {} generate-keys --public-key {} --private-key {}
+expect "Enter password for private key:"
+send "{}\r"
+expect "Confirm password:"
+send "{}\r"
+expect eof
+lassign [wait] pid spawnid os_error_flag value
+exit $value
+"#, pqenc_binary(), pub_path.display(), priv_path.display(), TEST_PASSWORD, TEST_PASSWORD);
+
+    let mut file = fs::File::create(&script_path).unwrap();
+    file.write_all(script.as_bytes()).unwrap();
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Set the umask in a child shell rather than the test process: umask(2) is
+    // get-and-set, so reading it from a threaded test harness is racy.
+    let output = Command::new("sh")
+        .args(&["-c", &format!("umask 022; exec {}", script_path.display())])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let priv_mode = fs::metadata(&priv_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(priv_mode, 0o600,
+               "Private key should be owner-only, got {:o}", priv_mode);
+
+    // Deliberately not 0600: the public key is meant to be distributed.
+    let pub_mode = fs::metadata(&pub_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(pub_mode, 0o644,
+               "Public key should follow umask, got {:o}", pub_mode);
+}
+
+#[test]
+fn test_generate_keys_leaves_no_temp_artifacts() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+
+    // Keys are written in place rather than staged through temp files. Key
+    // files share a directory with encrypted output in these tests, so a future
+    // staging refactor that stranded a `.tmp.` file would surface as a
+    // misleading failure in the encryption tests above.
+    let leftovers = temp_artifacts(pub_key.parent().unwrap());
+    assert!(leftovers.is_empty(),
+            "Key generation left temp artifacts behind: {:?}", leftovers);
+}
