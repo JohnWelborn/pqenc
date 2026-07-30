@@ -57,11 +57,16 @@ const MAGIC: &[u8] = b"PQE1";
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 
-/// Permission bits requested when creating encrypted output, before umask.
-/// 0o600 makes encrypted output owner-only, matching how `decrypt_file`
-/// handles plaintext. (0o666 would defer to umask, the pre-atomicity behavior.)
-#[cfg(unix)]
-const ENCRYPT_OUTPUT_MODE: u32 = 0o600;
+// File permission bits requested at creation, before umask. Not `#[cfg(unix)]`:
+// they are named at call sites that compile on every platform, and the helper
+// that consumes them ignores them off Unix.
+
+/// Owner-only. Used for encrypted output, decrypted plaintext, and the private key.
+const OWNER_ONLY_MODE: u32 = 0o600;
+
+/// Deferred to umask, which is what `File::create` requests. Used for the public
+/// key, which is *meant* to be handed out — deliberately not `OWNER_ONLY_MODE`.
+const DISTRIBUTABLE_MODE: u32 = 0o666;
 
 // X25519 and hybrid constants
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
@@ -205,17 +210,22 @@ fn sync_parent_dir(_path: &str) -> Result<()> {
 
 /// Create `path` for writing, failing if it already exists (O_CREAT|O_EXCL).
 /// The exclusive create is what makes claiming a path atomic and symlink-safe;
-/// it must never be replaced by a separate `exists()` check.
+/// it must never be replaced by a separate `exists()` check. (An advisory
+/// `exists()` check *in addition to* this claim is fine — see `generate_keys`.)
+///
+/// `mode` is requested before umask and is ignored on non-Unix platforms.
 ///
 /// Returns `io::Result` so callers can attach their own context message.
-fn create_new_output(path: &str) -> std::io::Result<File> {
+fn create_new_exclusive(path: &str, mode: u32) -> std::io::Result<File> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(ENCRYPT_OUTPUT_MODE);
+        opts.mode(mode);
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     opts.open(path)
 }
 
@@ -737,7 +747,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // Claim the output path atomically. O_CREAT|O_EXCL both enforces the
     // "already exists" rejection and prevents TOCTOU/symlink attacks, and it
     // reserves the name for the duration of the run.
-    create_new_output(output_path)
+    create_new_exclusive(output_path, OWNER_ONLY_MODE)
         .context("Failed to create output file (already exists or permission denied)")?;
     let mut output_guard = TempFileGuard::new(output_path.to_string());
 
@@ -747,7 +757,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // reverse closes fout, unlinks the temp, then unlinks the placeholder.
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
     let mut temp_guard = TempFileGuard::new(temp_path);
-    let mut fout = create_new_output(temp_guard.path())
+    let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
 
     // Build header and compute hash for AAD
