@@ -229,6 +229,34 @@ fn create_new_exclusive(path: &str, mode: u32) -> std::io::Result<File> {
     opts.open(path)
 }
 
+/// Create `path` exclusively, write `contents`, fsync the file, and close it.
+///
+/// Returns a `TempFileGuard` armed on `path`, which the caller disarms once the
+/// larger operation has committed. The guard is armed only after the exclusive
+/// create succeeds, so it can only ever remove a file this process created — it
+/// will never touch a pre-existing file at `path`.
+///
+/// On failure the partial file is removed before returning, so the caller never
+/// has to reason about cleaning up a path it does not yet own.
+#[must_use = "the returned guard deletes the file when dropped; bind it and disarm on success"]
+fn write_new_file_synced(path: &str, contents: &[u8], mode: u32) -> Result<TempFileGuard> {
+    // Claim BEFORE arming the guard. Declaring the guard first would arm it
+    // before the exclusive create succeeds, so an EEXIST from a pre-existing
+    // file would drop the guard and delete the user's real file.
+    let mut f = create_new_exclusive(path, mode)
+        .with_context(|| format!("Failed to create {} (already exists or permission denied)", path))?;
+    let guard = TempFileGuard::new(path.to_string());
+
+    let write_result = f.write_all(contents);
+    let sync_result = write_result.and_then(|()| f.sync_all());
+    // Close before the guard can unlink: on Windows, removing an open file
+    // fails with a sharing violation and would strand the partial file.
+    drop(f);
+    sync_result.with_context(|| format!("Failed to write and sync {}", path))?;
+
+    Ok(guard)
+}
+
 /// Encode bytes as PEM with custom headers
 fn pem_encode(der_bytes: &[u8], begin: &str, end: &str) -> String {
     let b64 = BASE64_STANDARD.encode(der_bytes);
@@ -457,7 +485,15 @@ fn run() -> Result<()> {
 ///
 /// Creates a hybrid post-quantum key pair using both ML-KEM-1024 and X25519,
 /// encodes them in PEM format, and encrypts the private key with a password.
-/// On Unix systems, sets private key permissions to 0o600 for security.
+///
+/// Guarantees:
+/// - The private key is written and made durable *before* the public key exists,
+///   because a stranded public key whose private half was never written is a
+///   silent data-loss trap: everything encrypted to it is unrecoverable.
+/// - All-or-nothing. Any failure leaves neither file behind, so a retry is not
+///   blocked by a leftover from the previous attempt.
+/// - On Unix the private key is 0o600, while the public key follows umask —
+///   it is meant to be distributed.
 ///
 /// # Arguments
 /// * `public_key_path` - Path where public key will be saved
@@ -472,6 +508,27 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     // Validate paths
     validate_path(public_key_path, false, false, "Public key")?;
     validate_path(private_key_path, false, false, "Private key")?;
+
+    if public_key_path == private_key_path {
+        bail!("Public and private key paths must differ: {}", public_key_path);
+    }
+
+    // Advisory pre-check, in addition to (never instead of) the exclusive create
+    // below. Losing this race only changes which error message the user sees; it
+    // can never cause a file to be clobbered. Running it here, before ~1-2s of
+    // key generation and both password prompts, is the entire point: otherwise
+    // the user types a password twice before learning the path was occupied.
+    //
+    // symlink_metadata rather than exists(): exists() follows symlinks and
+    // reports false for a dangling one, where O_EXCL still fails EEXIST.
+    for (path, description) in [
+        (private_key_path, "Private key"),
+        (public_key_path, "Public key"),
+    ] {
+        if fs::symlink_metadata(path).is_ok() {
+            bail!("{} file already exists, refusing to overwrite: {}", description, path);
+        }
+    }
 
     // Generate ML-KEM keypair
     let mut key_gen_randomness = [0u8; 64];
@@ -539,36 +596,41 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     let pem_pub = pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END);
     let pem_priv = pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END);
 
-    // Use create_new to atomically prevent TOCTOU/symlink attacks
-    let mut pub_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(public_key_path)?;
-    pub_file.write_all(pem_pub.as_bytes())?;
+    // Private key first. A stranded private key is recoverable — the ML-KEM
+    // public key is embedded in it and X25519's is a scalar-to-point derivation
+    // — whereas a stranded public key is a silent data-loss trap. The guards
+    // below make ordinary failures all-or-nothing; the ordering is what covers
+    // what guards structurally cannot (SIGKILL, power loss), since Drop does
+    // not run then.
+    //
+    // Declaration order is also the cleanup order: priv_guard is declared first
+    // and therefore dropped last, so a late failure removes the public key (the
+    // trap) before the private key. Do not reorder these bindings.
+    //
+    // Windows note: private-key hardening is unimplemented there. It needs
+    // ACLs; the previous set_readonly(false) call was a no-op on a file that
+    // had just been created and never had the attribute set.
+    let mut priv_guard =
+        write_new_file_synced(private_key_path, pem_priv.as_bytes(), OWNER_ONLY_MODE)?;
 
-    // Write private key with atomic 0600 permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(private_key_path)?;
-        file.write_all(pem_priv.as_bytes())?;
-    }
+    // The private key's directory entry must be durable before the public key
+    // can exist anywhere. Ordering the writes without ordering the directory
+    // syncs would fix only half the problem.
+    sync_parent_dir(private_key_path)
+        .context("Failed to sync directory containing the private key")?;
 
-    #[cfg(not(unix))]
-    {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(private_key_path)?;
-        file.write_all(pem_priv.as_bytes())?;
-        let mut perms = file.metadata()?.permissions();
-        perms.set_readonly(false);
-        file.set_permissions(perms)?;
-    }
+    let mut pub_guard =
+        write_new_file_synced(public_key_path, pem_pub.as_bytes(), DISTRIBUTABLE_MODE)?;
+
+    // Both syncs are load-bearing even when the keys share a directory: they
+    // commit different directory entries, and the first could not have covered
+    // the public key because it did not exist yet. Do not deduplicate them.
+    sync_parent_dir(public_key_path)
+        .context("Failed to sync directory containing the public key")?;
+
+    // Commit. Nothing fallible may run between here and the disarms.
+    pub_guard.disarm();
+    priv_guard.disarm();
 
     println!("Key pair generated successfully");
     println!("  Public key:  {}", public_key_path);
