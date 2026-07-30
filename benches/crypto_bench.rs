@@ -15,8 +15,13 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
     let pub_key = temp_dir.join("bench_pub.pem");
     let priv_key = temp_dir.join("bench_priv.pem");
 
-    // Only generate if they don't exist
+    // Only generate if they don't exist. If exactly one is present -- a half
+    // keypair stranded by an interrupted run -- both must go first, or keygen
+    // fails EEXIST on the survivor on every future bench run.
     if !pub_key.exists() || !priv_key.exists() {
+        let _ = fs::remove_file(&pub_key);
+        let _ = fs::remove_file(&priv_key);
+
         let script = format!(r#"#!/usr/bin/expect -f
 set timeout 30
 spawn {} generate-keys --public-key {} --private-key {}
@@ -25,6 +30,8 @@ send "bench-password\r"
 expect "Confirm password:"
 send "bench-password\r"
 expect eof
+lassign [wait] pid spawnid os_error_flag value
+exit $value
 "#, pqenc_binary(), pub_key.display(), priv_key.display());
 
         let script_path = temp_dir.join("gen_bench_keys.exp");
@@ -39,9 +46,13 @@ expect eof
             fs::set_permissions(&script_path, perms).unwrap();
         }
 
-        Command::new(&script_path)
+        let output = Command::new(&script_path)
             .output()
             .expect("Failed to generate benchmark keys");
+
+        // Without this the benchmarks would silently measure a missing keypair.
+        assert!(output.status.success(), "Benchmark key generation failed: {}",
+                String::from_utf8_lossy(&output.stderr));
     }
 
     (pub_key, priv_key)
@@ -166,6 +177,8 @@ send "bench-password\r"
 expect "Confirm password:"
 send "bench-password\r"
 expect eof
+lassign [wait] pid spawnid os_error_flag value
+exit $value
 "#, pqenc_binary(), pub_key.display(), priv_key.display());
 
             let script_path = temp_dir.join(format!("keygen_{}.exp", rand::random::<u32>()));

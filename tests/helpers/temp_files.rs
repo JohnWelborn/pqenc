@@ -42,6 +42,8 @@ send "{}\r"
 expect "Confirm password:"
 send "{}\r"
 expect eof
+lassign [wait] pid spawnid os_error_flag value
+exit $value
 "#, binary, self.pub_key_path.display(), self.priv_key_path.display(), password, password);
 
         let script_path = self._dir.path().join("gen_keys.exp");
