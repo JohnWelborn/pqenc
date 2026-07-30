@@ -295,3 +295,82 @@ fn test_encrypted_output_permissions() {
     let mode = fs::metadata(&encrypted_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "Encrypted output should be owner-only, got {:o}", mode);
 }
+
+/// Regression test for partial output on interrupted encryption.
+///
+/// Kills pqenc mid-stream and asserts nothing resembling a finished backup was
+/// left at the output path. Against the pre-atomicity implementation, which
+/// streamed the header and chunks straight to `output_path`, this fails.
+///
+/// stdin is deliberately never closed, so the child cannot reach EOF and finish
+/// on its own no matter how fast it encrypts — that is what keeps the timing
+/// non-flaky. The writer thread stops when the kill breaks the pipe.
+#[cfg(unix)]
+#[test]
+fn test_encrypt_killed_midstream_leaves_no_partial_output() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let encrypted_path = env.file_path("interrupted.enc");
+    let dir = encrypted_path.parent().unwrap().to_path_buf();
+
+    let mut child = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", "-",
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let block = vec![0xABu8; 64 * 1024];
+        // Feed until the child dies and the pipe breaks; ignore the resulting error.
+        while stdin.write_all(&block).is_ok() {}
+    });
+
+    // Wait until encryption is genuinely underway: the pre-fix build grows
+    // `interrupted.enc`, the post-fix build grows a `.tmp.` sibling.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let output_started = fs::metadata(&encrypted_path).map(|m| m.len() > 0).unwrap_or(false);
+        let temp_started = temp_artifacts(&dir).iter().any(|name| {
+            fs::metadata(dir.join(name)).map(|m| m.len() > 0).unwrap_or(false)
+        });
+        if output_started || temp_started {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = writer.join();
+
+    // Core assertion: no partial ciphertext at the destination. A SIGKILL cannot
+    // run Drop, so the 0-byte placeholder legitimately survives — but it must
+    // never contain data that could be mistaken for a completed backup.
+    if let Ok(meta) = fs::metadata(&encrypted_path) {
+        assert_eq!(meta.len(), 0,
+                   "Interrupted encryption left {} bytes of partial output at the destination",
+                   meta.len());
+        assert_ne!(fs::read(&encrypted_path).unwrap().get(..4), Some(&b"PQE1"[..]),
+                   "Interrupted encryption left a pqenc header at the destination");
+    }
+
+    // Guard against the test passing vacuously: confirm real ciphertext was in
+    // flight at kill time, and that it was accumulating at the temp path.
+    let leftovers = temp_artifacts(&dir);
+    assert!(!leftovers.is_empty(),
+            "Expected an orphaned temp file after SIGKILL; encryption may not have started");
+    let temp_bytes = fs::read(dir.join(&leftovers[0])).unwrap();
+    assert_eq!(temp_bytes.get(..4), Some(&b"PQE1"[..]),
+               "Temp file should hold the real output stream");
+}
