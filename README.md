@@ -26,6 +26,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Formally verified** - Uses libcrux, a formally verified cryptography library
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
+- **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
 
 ## Quick Start
 
@@ -54,6 +55,14 @@ pqenc encrypt --public-key pub.key --encrypt data.tar.gz --output data.tar.gz.pq
 # Encrypt a directory without writing plaintext to disk
 tar czf - /path/to/data | pqenc encrypt --public-key pub.key --encrypt - --output backup.tar.gz.pqe
 ```
+
+Encrypted output is written with mode `0600` (owner read/write only). If a backup
+agent running as a different user needs to read it, adjust permissions or ownership
+after encryption.
+
+Encryption refuses to overwrite an existing output file. Because output is written
+atomically, a failed or interrupted run leaves no partial file behind, so the next
+run is not blocked by a leftover stump.
 
 ### 3. Decrypt to restore (only when needed, using the private key)
 

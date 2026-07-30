@@ -57,6 +57,12 @@ const MAGIC: &[u8] = b"PQE1";
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 
+/// Permission bits requested when creating encrypted output, before umask.
+/// 0o600 makes encrypted output owner-only, matching how `decrypt_file`
+/// handles plaintext. (0o666 would defer to umask, the pre-atomicity behavior.)
+#[cfg(unix)]
+const ENCRYPT_OUTPUT_MODE: u32 = 0o600;
+
 // X25519 and hybrid constants
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
 const X25519_PRIVATE_KEY_SIZE: usize = 32;
@@ -147,7 +153,8 @@ impl SensitiveData {
 ///
 /// Automatically deletes the temporary file when dropped unless explicitly
 /// told to keep it (via `disarm()`). This prevents leaking sensitive plaintext
-/// in temporary files if decryption fails or panics.
+/// if decryption fails or panics, and prevents a partial ciphertext that looks
+/// like a completed backup from surviving a failed encryption.
 struct TempFileGuard {
     path: Option<String>,
 }
@@ -194,6 +201,22 @@ fn sync_parent_dir(path: &str) -> Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &str) -> Result<()> {
     Ok(())
+}
+
+/// Create `path` for writing, failing if it already exists (O_CREAT|O_EXCL).
+/// The exclusive create is what makes claiming a path atomic and symlink-safe;
+/// it must never be replaced by a separate `exists()` check.
+///
+/// Returns `io::Result` so callers can attach their own context message.
+fn create_new_output(path: &str) -> std::io::Result<File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(ENCRYPT_OUTPUT_MODE);
+    }
+    opts.open(path)
 }
 
 /// Encode bytes as PEM with custom headers
@@ -618,6 +641,8 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
 /// 3. Combines both secrets and derives an AES-256 key using HKDF-SHA256
 /// 4. Encrypts the file in 64KB chunks using AES-256-GCM with unique nonces
 /// 5. Writes encrypted output with header containing KEM ciphertext, X25519 public key, salt, and base nonce
+/// 6. Streams into a sibling temp file and renames it into place, so a failed
+///    run never leaves a partial output that looks like a completed backup
 ///
 /// # Arguments
 /// * `input_path` - Path to plaintext file to encrypt
@@ -629,6 +654,7 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
 /// * `Err` if validation fails, encryption fails, or I/O errors occur
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, EphemeralSecret};
+    use rand::RngExt;
 
     let is_stdin = is_stdin_path(input_path);
 
@@ -708,12 +734,21 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         Some(File::open(input_path)?.metadata()?.len())
     };
 
-    // Use create_new to atomically prevent TOCTOU/symlink attacks
-    let mut fout = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)
+    // Claim the output path atomically. O_CREAT|O_EXCL both enforces the
+    // "already exists" rejection and prevents TOCTOU/symlink attacks, and it
+    // reserves the name for the duration of the run.
+    create_new_output(output_path)
         .context("Failed to create output file (already exists or permission denied)")?;
+    let mut output_guard = TempFileGuard::new(output_path.to_string());
+
+    // Stream ciphertext into a sibling temp file and rename over the placeholder
+    // on success, so a failure mid-write can never leave a partial .enc at
+    // output_path. Guard declaration order is the cleanup contract: dropping in
+    // reverse closes fout, unlinks the temp, then unlinks the placeholder.
+    let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
+    let mut temp_guard = TempFileGuard::new(temp_path);
+    let mut fout = create_new_output(temp_guard.path())
+        .context("Failed to create temporary output file")?;
 
     // Build header and compute hash for AAD
     let kem_ct_len = ciphertext.as_slice().len() as u32;
@@ -789,7 +824,20 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     }
 
     fout.sync_all().context("Failed to sync output file to disk")?;
-    sync_parent_dir(output_path).context("Failed to sync output directory to disk")?;
+    // Close before rename: required on Windows, and it guarantees the fd is gone
+    // before TempFileGuard can unlink on any later error path.
+    drop(fout);
+
+    // Commit. Nothing fallible may run between the rename and the two disarms:
+    // an early return in that gap would delete the freshly-renamed good output.
+    // This is the bug 7fc6654 fixed in decrypt_file — do not reintroduce it.
+    fs::rename(temp_guard.path(), output_path)
+        .context("Failed to move encrypted file to final destination")?;
+    temp_guard.disarm();
+    output_guard.disarm();
+
+    sync_parent_dir(output_path)
+        .context("Failed to sync directory after rename; encrypted output may not survive a crash")?;
 
     println!("File encrypted successfully");
     if let Some(size) = input_size {
