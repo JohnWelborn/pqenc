@@ -88,7 +88,7 @@ Tests with randomized inputs using proptest:
 ## Test Implementation Notes
 
 ### Password Handling in Tests
-Integration and security tests use `expect` scripts to handle interactive password prompts when testing CLI commands. The test helpers in `tests/helpers/` automatically generate and execute these scripts.
+Integration and security tests supply the private-key password non-interactively via `pqenc`'s `--passphrase` flag, so no interactive prompt (and no external `expect` dependency) is involved. The test helpers in `tests/helpers/` wrap this in `generate_keys_with_password`/`decrypt_file_with_password`.
 
 ### Test Data Generation
 The `TestData` helper in `tests/helpers/test_data.rs` provides utilities for generating:

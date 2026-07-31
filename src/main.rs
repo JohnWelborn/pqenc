@@ -110,6 +110,9 @@ Examples:
 
   # Decrypt a file
   pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key
+
+  # Non-interactive (e.g. scripts, CI): pass the passphrase directly
+  pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
 "
 )]
 struct Cli {
@@ -124,6 +127,9 @@ enum Commands {
         public_key: String,
         #[arg(long, short = 's')]
         private_key: String,
+        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+            Warning: visible to other users via `ps`/process listings and may be recorded in shell history.")]
+        passphrase: Option<String>,
     },
     Encrypt {
         #[arg(long = "encrypt", short = 'i')]
@@ -140,6 +146,9 @@ enum Commands {
         output: String,
         #[arg(long, short = 's')]
         private_key: String,
+        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+            Warning: visible to other users via `ps`/process listings and may be recorded in shell history.")]
+        passphrase: Option<String>,
     },
 }
 
@@ -467,14 +476,14 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::GenerateKeys { public_key, private_key } => {
-            generate_keys(&public_key, &private_key)?;
+        Commands::GenerateKeys { public_key, private_key, passphrase } => {
+            generate_keys(&public_key, &private_key, passphrase)?;
         }
         Commands::Encrypt { input, output, public_key } => {
             encrypt_file(&input, &output, &public_key)?;
         }
-        Commands::Decrypt { input, output, private_key } => {
-            decrypt_file(&input, &output, &private_key)?;
+        Commands::Decrypt { input, output, private_key, passphrase } => {
+            decrypt_file(&input, &output, &private_key, passphrase)?;
         }
     }
 
@@ -498,11 +507,12 @@ fn run() -> Result<()> {
 /// # Arguments
 /// * `public_key_path` - Path where public key will be saved
 /// * `private_key_path` - Path where private key will be saved (encrypted)
+/// * `passphrase` - If given, used instead of the interactive prompt
 ///
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err` if files already exist, paths are invalid, or key generation fails
-fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
+fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
     // Validate paths
@@ -559,11 +569,17 @@ fn generate_keys(public_key_path: &str, private_key_path: &str) -> Result<()> {
     composite_priv.extend_from_slice(mlkem_sk_bytes);
     composite_priv.extend_from_slice(x25519_secret.to_bytes().as_ref());
 
-    // Prompt for password
-    eprintln!("Enter password for private key:");
-    let mut password1 = rpassword::read_password()?;
-    eprintln!("Confirm password:");
-    let mut password2 = rpassword::read_password()?;
+    // Prompt for password, unless a passphrase was supplied on the command line.
+    let (mut password1, mut password2) = match passphrase {
+        Some(p) => (p.clone(), p),
+        None => {
+            eprintln!("Enter password for private key:");
+            let p1 = rpassword::read_password()?;
+            eprintln!("Confirm password:");
+            let p2 = rpassword::read_password()?;
+            (p1, p2)
+        }
+    };
 
     if password1 != password2 {
         password1.zeroize();
@@ -927,7 +943,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 ///
 /// Performs hybrid post-quantum decryption:
 /// 1. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce)
-/// 2. Prompts for password and decrypts the password-protected private key
+/// 2. Obtains the password (prompt, or the supplied passphrase) and decrypts the password-protected private key
 /// 3. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
 /// 4. Performs X25519 key exchange with ephemeral public key
 /// 5. Combines secrets and derives the AES-256 key using HKDF-SHA256
@@ -938,11 +954,12 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 /// * `input_path` - Path to encrypted file
 /// * `output_path` - Path where decrypted file will be written
 /// * `private_key_path` - Path to password-encrypted hybrid private key
+/// * `passphrase` - If given, used instead of the interactive prompt
 ///
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
-fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> Result<()> {
+fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
     use rand::RngExt;
 
@@ -987,8 +1004,13 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str) -> 
     let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
     let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
 
-    eprintln!("Enter private key password:");
-    let mut password = rpassword::read_password()?;
+    let mut password = match passphrase {
+        Some(p) => p,
+        None => {
+            eprintln!("Enter private key password:");
+            rpassword::read_password()?
+        }
+    };
     let composite_priv = {
         let result = decrypt_private_key(&encrypted_blob, password.as_bytes());
         password.zeroize();

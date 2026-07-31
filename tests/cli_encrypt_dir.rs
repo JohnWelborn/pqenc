@@ -1,40 +1,21 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 const TEST_PASSWORD: &str = "test-tar-password";
 
-fn generate_keys_with_password(temp_root: &Path, pub_path: &Path, priv_path: &Path) {
+fn generate_keys_with_password(pub_path: &Path, priv_path: &Path) {
     let binary = env!("CARGO_BIN_EXE_pqenc");
 
-    // Create expect script for key generation
-    let script = format!(r#"#!/usr/bin/expect -f
-set timeout 10
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "{}\r"
-expect "Confirm password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, binary, pub_path.display(), priv_path.display(), TEST_PASSWORD, TEST_PASSWORD);
-
-    let script_path = temp_root.join("gen_keys.exp");
-    let mut file = fs::File::create(&script_path).unwrap();
-    file.write_all(script.as_bytes()).unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = file.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
-
-    let output = Command::new(&script_path)
+    let output = Command::new(binary)
+        .args([
+            "generate-keys",
+            "--public-key", pub_path.to_str().unwrap(),
+            "--private-key", priv_path.to_str().unwrap(),
+            "--passphrase", TEST_PASSWORD,
+        ])
         .output()
         .expect("Failed to generate keys");
 
@@ -57,18 +38,6 @@ fn test_encrypt_directory_via_tar_command() {
         return;
     }
 
-    // Check if expect is available
-    if Command::new("expect")
-        .arg("-v")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
-        eprintln!("Skipping test: expect not available");
-        return;
-    }
-
     let temp_root = TempDir::new().unwrap();
     let dir_name = "data";
     let dir_path = temp_root.path().join(dir_name);
@@ -80,7 +49,7 @@ fn test_encrypt_directory_via_tar_command() {
 
     let public_key_path = temp_root.path().join("pub.key");
     let private_key_path = temp_root.path().join("priv.key");
-    generate_keys_with_password(temp_root.path(), &public_key_path, &private_key_path);
+    generate_keys_with_password(&public_key_path, &private_key_path);
 
     let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
@@ -127,33 +96,17 @@ fn test_encrypt_directory_via_tar_command() {
     let extract_dir = temp_root.path().join("extracted");
     fs::create_dir(&extract_dir).unwrap();
 
-    // Create expect script for decryption that pipes to tar
     let decrypted_tar_path = temp_root.path().join("decrypted.tar.gz");
-    let decrypt_script = format!(r#"#!/usr/bin/expect -f
-set timeout 10
-spawn {} decrypt --decrypt {} --output {} --private-key {}
-expect "Enter private key password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_bin, encrypted_path.display(), decrypted_tar_path.display(), private_key_path.display(), TEST_PASSWORD);
-
-    let decrypt_script_path = temp_root.path().join("decrypt.exp");
-    let mut file = fs::File::create(&decrypt_script_path).unwrap();
-    file.write_all(decrypt_script.as_bytes()).unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = file.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&decrypt_script_path, perms).unwrap();
-    }
-
-    let decrypt_output = Command::new(&decrypt_script_path)
+    let decrypt_output = Command::new(&pqenc_bin)
+        .args([
+            "decrypt",
+            "--decrypt", encrypted_path.to_str().unwrap(),
+            "--output", decrypted_tar_path.to_str().unwrap(),
+            "--private-key", private_key_path.to_str().unwrap(),
+            "--passphrase", TEST_PASSWORD,
+        ])
         .output()
-        .expect("Failed to run decrypt script");
+        .expect("Failed to run pqenc decrypt");
 
     assert!(decrypt_output.status.success(), "pqenc decrypt failed: {}",
             String::from_utf8_lossy(&decrypt_output.stderr));
@@ -188,17 +141,6 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
         return;
     }
 
-    if Command::new("expect")
-        .arg("-v")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
-        eprintln!("Skipping test: expect not available");
-        return;
-    }
-
     let temp_root = TempDir::new().unwrap();
     let dir_name = "data";
     let dir_path = temp_root.path().join(dir_name);
@@ -210,7 +152,7 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
 
     let public_key_path = temp_root.path().join("pub.key");
     let private_key_path = temp_root.path().join("priv.key");
-    generate_keys_with_password(temp_root.path(), &public_key_path, &private_key_path);
+    generate_keys_with_password(&public_key_path, &private_key_path);
 
     let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
@@ -248,31 +190,16 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
 
     // Decrypt and verify
     let decrypted_tar_path = temp_root.path().join("decrypted.tar.gz");
-    let decrypt_script = format!(r#"#!/usr/bin/expect -f
-set timeout 10
-spawn {} decrypt --decrypt {} --output {} --private-key {}
-expect "Enter private key password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_bin, encrypted_path.display(), decrypted_tar_path.display(), private_key_path.display(), TEST_PASSWORD);
-
-    let decrypt_script_path = temp_root.path().join("decrypt.exp");
-    let mut file = fs::File::create(&decrypt_script_path).unwrap();
-    file.write_all(decrypt_script.as_bytes()).unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = file.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&decrypt_script_path, perms).unwrap();
-    }
-
-    let decrypt_output = Command::new(&decrypt_script_path)
+    let decrypt_output = Command::new(&pqenc_bin)
+        .args([
+            "decrypt",
+            "--decrypt", encrypted_path.to_str().unwrap(),
+            "--output", decrypted_tar_path.to_str().unwrap(),
+            "--private-key", private_key_path.to_str().unwrap(),
+            "--passphrase", TEST_PASSWORD,
+        ])
         .output()
-        .expect("Failed to run decrypt script");
+        .expect("Failed to run pqenc decrypt");
 
     assert!(decrypt_output.status.success(), "pqenc decrypt failed: {}",
             String::from_utf8_lossy(&decrypt_output.stderr));

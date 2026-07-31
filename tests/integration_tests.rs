@@ -390,36 +390,20 @@ fn run_generate_keys(pub_path: &std::path::Path, priv_path: &std::path::Path)
         .unwrap()
 }
 
-/// Run `generate-keys` through `expect`, supplying the password, so execution
+/// Run `generate-keys` supplying the passphrase directly, so execution
 /// reaches the file writes. Required by any test about write behavior.
 #[cfg(unix)]
 fn run_generate_keys_answering_prompts(
-    env: &TempTestEnv,
     pub_path: &std::path::Path,
     priv_path: &std::path::Path,
-    script_name: &str,
 ) -> std::process::Output {
-    use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt;
-
-    let script = format!(r#"#!/usr/bin/expect -f
-set timeout 30
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "{}\r"
-expect "Confirm password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_binary(), pub_path.display(), priv_path.display(), TEST_PASSWORD, TEST_PASSWORD);
-
-    let script_path = env.file_path(script_name);
-    let mut file = fs::File::create(&script_path).unwrap();
-    file.write_all(script.as_bytes()).unwrap();
-    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-    Command::new(&script_path).output().unwrap()
+    Command::new(pqenc_binary())
+        .args(&["generate-keys",
+            "--public-key", pub_path.to_str().unwrap(),
+            "--private-key", priv_path.to_str().unwrap(),
+            "--passphrase", TEST_PASSWORD])
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -505,8 +489,7 @@ fn test_generate_keys_leaves_no_public_key_when_private_write_fails() {
 
     // Must answer the prompts: the failure under test happens at the file
     // writes, which are only reached after the password is accepted.
-    let output = run_generate_keys_answering_prompts(
-        &env, &pub_path, &priv_path, "stranded_keygen.exp");
+    let output = run_generate_keys_answering_prompts(&pub_path, &priv_path);
 
     // Restore before asserting so a failure cannot leave an undeletable TempDir.
     fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -521,34 +504,25 @@ fn test_generate_keys_leaves_no_public_key_when_private_write_fails() {
 #[cfg(unix)]
 #[test]
 fn test_generate_keys_key_file_permissions() {
-    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt;
 
     let env = TempTestEnv::new();
     let pub_path = env.file_path("perm_pub.key");
     let priv_path = env.file_path("perm_priv.key");
-    let script_path = env.file_path("perm_keygen.exp");
-
-    let script = format!(r#"#!/usr/bin/expect -f
-set timeout 30
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "{}\r"
-expect "Confirm password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_binary(), pub_path.display(), priv_path.display(), TEST_PASSWORD, TEST_PASSWORD);
-
-    let mut file = fs::File::create(&script_path).unwrap();
-    file.write_all(script.as_bytes()).unwrap();
-    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
     // Set the umask in a child shell rather than the test process: umask(2) is
-    // get-and-set, so reading it from a threaded test harness is racy.
+    // get-and-set, so reading it from a threaded test harness is racy. Args
+    // after the inline script are passed through as "$0" "$@" rather than
+    // interpolated into the shell string, so paths/passphrase can't be
+    // misparsed by the shell.
     let output = Command::new("sh")
-        .args(&["-c", &format!("umask 022; exec {}", script_path.display())])
+        .arg("-c")
+        .arg(r#"umask 022; exec "$0" "$@""#)
+        .arg(pqenc_binary())
+        .args(&["generate-keys",
+            "--public-key", pub_path.to_str().unwrap(),
+            "--private-key", priv_path.to_str().unwrap(),
+            "--passphrase", TEST_PASSWORD])
         .output()
         .unwrap();
     assert!(output.status.success(), "Key generation failed: {}",

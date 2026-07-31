@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::fs;
-use std::io::Write;
 use tempfile::TempDir;
 
 pub struct TempTestEnv {
@@ -34,31 +33,13 @@ impl TempTestEnv {
 
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
-        let script = format!(r#"#!/usr/bin/expect -f
-set timeout 10
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "{}\r"
-expect "Confirm password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, binary, self.pub_key_path.display(), self.priv_key_path.display(), password, password);
-
-        let script_path = self._dir.path().join("gen_keys.exp");
-        let mut file = fs::File::create(&script_path).unwrap();
-        file.write_all(script.as_bytes()).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let output = Command::new(&script_path)
+        let output = Command::new(binary)
+            .args(&[
+                "generate-keys",
+                "--public-key", self.pub_key_path.to_str().unwrap(),
+                "--private-key", self.priv_key_path.to_str().unwrap(),
+                "--passphrase", password,
+            ])
             .output()
             .expect("Failed to generate keys");
 
@@ -79,35 +60,21 @@ exit $value
 
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
-        let script = format!(r#"#!/usr/bin/expect -f
-set timeout 10
-spawn {} decrypt --decrypt {} --output {} --private-key {}
-expect "Enter private key password:"
-send "{}\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, binary, input, output, self.priv_key_path.display(), password);
-
-        let script_path = self._dir.path().join("decrypt.exp");
-        let mut file = fs::File::create(&script_path).unwrap();
-        file.write_all(script.as_bytes()).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let output = Command::new(&script_path).output()
+        let result = Command::new(binary)
+            .args(&[
+                "decrypt",
+                "--decrypt", input,
+                "--output", output,
+                "--private-key", self.priv_key_path.to_str().unwrap(),
+                "--passphrase", password,
+            ])
+            .output()
             .map_err(|e| format!("Failed to run decrypt: {}", e))?;
 
-        if output.status.success() {
+        if result.status.success() {
             Ok(())
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).to_string())
+            Err(String::from_utf8_lossy(&result.stderr).to_string())
         }
     }
 }

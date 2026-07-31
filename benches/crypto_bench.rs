@@ -2,8 +2,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
-use std::io::Write;
 use std::time::Duration;
+
+const BENCH_PASSWORD: &str = "bench-password";
 
 fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
@@ -22,31 +23,11 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
         let _ = fs::remove_file(&pub_key);
         let _ = fs::remove_file(&priv_key);
 
-        let script = format!(r#"#!/usr/bin/expect -f
-set timeout 30
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "bench-password\r"
-expect "Confirm password:"
-send "bench-password\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_binary(), pub_key.display(), priv_key.display());
-
-        let script_path = temp_dir.join("gen_bench_keys.exp");
-        let mut file = fs::File::create(&script_path).unwrap();
-        file.write_all(script.as_bytes()).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let output = Command::new(&script_path)
+        let output = Command::new(pqenc_binary())
+            .args(&["generate-keys",
+                "--public-key", pub_key.to_str().unwrap(),
+                "--private-key", priv_key.to_str().unwrap(),
+                "--passphrase", BENCH_PASSWORD])
             .output()
             .expect("Failed to generate benchmark keys");
 
@@ -124,27 +105,12 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
             size,
             |b, _| {
                 b.iter(|| {
-                    let script = format!(r#"#!/usr/bin/expect -f
-set timeout 30
-spawn {} decrypt --decrypt {} --output {} --private-key {}
-expect "Enter private key password:"
-send "bench-password\r"
-expect eof
-"#, pqenc_binary(), encrypted_path.display(), output_path.display(), priv_key.display());
-
-                    let script_path = temp_dir.join(format!("bench_decrypt_{}.exp", size));
-                    let mut file = fs::File::create(&script_path).unwrap();
-                    file.write_all(script.as_bytes()).unwrap();
-
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = file.metadata().unwrap().permissions();
-                        perms.set_mode(0o755);
-                        fs::set_permissions(&script_path, perms).unwrap();
-                    }
-
-                    let output = Command::new(&script_path)
+                    let output = Command::new(pqenc_binary())
+                        .args(&["decrypt",
+                            "--decrypt", encrypted_path.to_str().unwrap(),
+                            "--output", output_path.to_str().unwrap(),
+                            "--private-key", priv_key.to_str().unwrap(),
+                            "--passphrase", BENCH_PASSWORD])
                         .output()
                         .unwrap();
 
@@ -169,31 +135,11 @@ fn benchmark_key_generation(c: &mut Criterion) {
             let pub_key = temp_dir.join(format!("keygen_pub_{}.pem", rand::random::<u32>()));
             let priv_key = temp_dir.join(format!("keygen_priv_{}.pem", rand::random::<u32>()));
 
-            let script = format!(r#"#!/usr/bin/expect -f
-set timeout 30
-spawn {} generate-keys --public-key {} --private-key {}
-expect "Enter password for private key:"
-send "bench-password\r"
-expect "Confirm password:"
-send "bench-password\r"
-expect eof
-lassign [wait] pid spawnid os_error_flag value
-exit $value
-"#, pqenc_binary(), pub_key.display(), priv_key.display());
-
-            let script_path = temp_dir.join(format!("keygen_{}.exp", rand::random::<u32>()));
-            let mut file = fs::File::create(&script_path).unwrap();
-            file.write_all(script.as_bytes()).unwrap();
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = file.metadata().unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&script_path, perms).unwrap();
-            }
-
-            let output = Command::new(&script_path)
+            let output = Command::new(pqenc_binary())
+                .args(&["generate-keys",
+                    "--public-key", pub_key.to_str().unwrap(),
+                    "--private-key", priv_key.to_str().unwrap(),
+                    "--passphrase", BENCH_PASSWORD])
                 .output()
                 .unwrap();
 
@@ -202,7 +148,6 @@ exit $value
             // Cleanup
             let _ = fs::remove_file(&pub_key);
             let _ = fs::remove_file(&priv_key);
-            let _ = fs::remove_file(&script_path);
         });
     });
 
