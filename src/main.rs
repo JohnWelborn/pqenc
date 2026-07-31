@@ -86,6 +86,8 @@ const PEM_PUB_BEGIN: &str = "-----BEGIN PQENC PUBLIC KEY-----";
 const PEM_PUB_END: &str = "-----END PQENC PUBLIC KEY-----";
 const PEM_PRIV_ENC_BEGIN: &str = "-----BEGIN PQENC ENCRYPTED PRIVATE KEY-----";
 const PEM_PRIV_ENC_END: &str = "-----END PQENC ENCRYPTED PRIVATE KEY-----";
+const PEM_PRIV_BEGIN: &str = "-----BEGIN PQENC PRIVATE KEY-----";
+const PEM_PRIV_END: &str = "-----END PQENC PRIVATE KEY-----";
 
 #[derive(Parser)]
 #[command(
@@ -113,6 +115,9 @@ Examples:
 
   # Non-interactive (e.g. scripts, CI): pass the passphrase directly
   pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
+
+  # Generate a keypair with no passphrase (e.g. disk already encrypted)
+  pqenc generate-keys --public-key pub.key --private-key priv.key --passphrase \"\"
 "
 )]
 struct Cli {
@@ -128,7 +133,8 @@ enum Commands {
         #[arg(long, short = 's')]
         private_key: String,
         #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
-            Warning: visible to other users via `ps`/process listings and may be recorded in shell history.")]
+            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
+            Pass an empty value to store/read the private key in plain text (not recommended).")]
         passphrase: Option<String>,
     },
     Encrypt {
@@ -147,7 +153,8 @@ enum Commands {
         #[arg(long, short = 's')]
         private_key: String,
         #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
-            Warning: visible to other users via `ps`/process listings and may be recorded in shell history.")]
+            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
+            Pass an empty value to store/read the private key in plain text (not recommended).")]
         passphrase: Option<String>,
     },
 }
@@ -493,7 +500,8 @@ fn run() -> Result<()> {
 /// Generates a new ML-KEM-1024 + X25519 hybrid keypair and saves to files.
 ///
 /// Creates a hybrid post-quantum key pair using both ML-KEM-1024 and X25519,
-/// encodes them in PEM format, and encrypts the private key with a password.
+/// encodes them in PEM format, and encrypts the private key with a
+/// passphrase (or, if the passphrase is empty, stores it in plain text).
 ///
 /// Guarantees:
 /// - The private key is written and made durable *before* the public key exists,
@@ -506,8 +514,9 @@ fn run() -> Result<()> {
 ///
 /// # Arguments
 /// * `public_key_path` - Path where public key will be saved
-/// * `private_key_path` - Path where private key will be saved (encrypted)
-/// * `passphrase` - If given, used instead of the interactive prompt
+/// * `private_key_path` - Path where private key will be saved
+/// * `passphrase` - If given, used instead of the interactive prompt. An
+///   empty passphrase stores the private key in plain text.
 ///
 /// # Returns
 /// * `Ok(())` on success
@@ -569,13 +578,17 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     composite_priv.extend_from_slice(mlkem_sk_bytes);
     composite_priv.extend_from_slice(x25519_secret.to_bytes().as_ref());
 
-    // Prompt for password, unless a passphrase was supplied on the command line.
+    let display_priv_path = std::path::absolute(private_key_path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| private_key_path.to_string());
+
+    // Prompt for a passphrase, unless one was supplied on the command line.
     let (mut password1, mut password2) = match passphrase {
         Some(p) => (p.clone(), p),
         None => {
-            eprintln!("Enter password for private key:");
+            eprintln!("Enter passphrase for \"{}\" (empty for no passphrase):", display_priv_path);
             let p1 = rpassword::read_password()?;
-            eprintln!("Confirm password:");
+            eprintln!("Enter same passphrase again:");
             let p2 = rpassword::read_password()?;
             (p1, p2)
         }
@@ -584,23 +597,28 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     if password1 != password2 {
         password1.zeroize();
         password2.zeroize();
-        bail!("Passwords do not match");
+        bail!("Passphrases do not match");
     }
-    if password1.is_empty() {
-        password1.zeroize();
-        password2.zeroize();
-        bail!("Password cannot be empty");
-    }
-    if password1.len() < 12 {
+    let unencrypted = password1.is_empty();
+    if unencrypted {
+        eprintln!("WARNING: \"{}\" will be stored plain text.", display_priv_path);
+    } else if password1.len() < 12 {
         eprintln!("Warning: Password shorter than 12 characters may be weak");
     }
 
-    // Encrypt private key
-    let encrypted_priv = {
-        let result = encrypt_private_key(&composite_priv, password1.as_bytes());
+    // Encrypt the private key, unless an empty passphrase opted out of encryption.
+    let pem_priv = if unencrypted {
         password1.zeroize();
         password2.zeroize();
-        result?
+        pem_encode(&composite_priv, PEM_PRIV_BEGIN, PEM_PRIV_END)
+    } else {
+        let encrypted_priv = {
+            let result = encrypt_private_key(&composite_priv, password1.as_bytes());
+            password1.zeroize();
+            password2.zeroize();
+            result?
+        };
+        pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)
     };
 
     // Zeroize sensitive data
@@ -610,7 +628,6 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
 
     // Save as PEM
     let pem_pub = pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END);
-    let pem_priv = pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END);
 
     // Private key first. A stranded private key is recoverable — the ML-KEM
     // public key is embedded in it and X25519's is a scalar-to-point derivation
@@ -652,7 +669,11 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     println!("  Public key:  {}", public_key_path);
     println!("  Private key: {}", private_key_path);
     println!("  Algorithm:   ML-KEM-1024 + X25519 (hybrid)");
-    println!("  Private key is password-encrypted");
+    if unencrypted {
+        println!("  Private key is stored in plain text (no passphrase)");
+    } else {
+        println!("  Private key is passphrase-protected");
+    }
 
     Ok(())
 }
@@ -943,7 +964,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 ///
 /// Performs hybrid post-quantum decryption:
 /// 1. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce)
-/// 2. Obtains the password (prompt, or the supplied passphrase) and decrypts the password-protected private key
+/// 2. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
+///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
 /// 3. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
 /// 4. Performs X25519 key exchange with ephemeral public key
 /// 5. Combines secrets and derives the AES-256 key using HKDF-SHA256
@@ -953,8 +975,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 /// # Arguments
 /// * `input_path` - Path to encrypted file
 /// * `output_path` - Path where decrypted file will be written
-/// * `private_key_path` - Path to password-encrypted hybrid private key
-/// * `passphrase` - If given, used instead of the interactive prompt
+/// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
+/// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
 ///
 /// # Returns
 /// * `Ok(())` on success
@@ -1000,21 +1022,31 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
     let mut temp_guard = TempFileGuard::new(temp_path);
 
-    // Read and decrypt private key
+    // Read and decrypt (or, for a plain-text key, simply decode) the private key
     let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
-    let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
 
-    let mut password = match passphrase {
-        Some(p) => p,
-        None => {
-            eprintln!("Enter private key password:");
-            rpassword::read_password()?
-        }
-    };
-    let composite_priv = {
+    let composite_priv = if pem_text.contains(PEM_PRIV_ENC_BEGIN) {
+        let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
+        let mut password = match passphrase {
+            Some(p) => p,
+            None => {
+                let display_path = std::path::absolute(private_key_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| private_key_path.to_string());
+                eprintln!("Enter passphrase for \"{}\":", display_path);
+                rpassword::read_password()?
+            }
+        };
         let result = decrypt_private_key(&encrypted_blob, password.as_bytes());
         password.zeroize();
         result?
+    } else if pem_text.contains(PEM_PRIV_BEGIN) {
+        if passphrase.is_some() {
+            eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
+        }
+        SensitiveData::new(pem_decode(&pem_text, PEM_PRIV_BEGIN, PEM_PRIV_END)?)
+    } else {
+        bail!("Not a valid pqenc private key file: {}", private_key_path);
     };
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 

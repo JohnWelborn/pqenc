@@ -48,9 +48,10 @@ Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine tha
 
 **The password cannot be recovered.** `priv.key` is stored encrypted, and the
 password is the only thing that opens it. There is no recovery path, no escrow,
-and no way to export an unencrypted copy — pqenc has exactly three commands, and
-none of them can help you here. Losing the password destroys your backups just as
-completely as losing `priv.key` itself; neither half is any use without the other.
+and no way to strip encryption from an already-encrypted key without the
+password — pqenc has exactly three commands, and none of them can help you
+here. Losing the password destroys your backups just as completely as losing
+`priv.key` itself; neither half is any use without the other.
 
 This is a deliberate design choice, and it means the password should be stored
 **with** the offline private key rather than treated as an independent secret.
@@ -58,6 +59,13 @@ The two defend against different threats — the encrypted file protects against
 someone who obtains your backups, the password protects against someone who
 obtains the file — and neither threat is the one pqenc is built around. An
 attacker who compromises the backup machine gets only `pub.key` either way.
+
+If you deliberately want no passphrase — e.g. the key already lives on an
+encrypted volume, or this is a throwaway test key — pass an empty one:
+`--passphrase ""`. This stores `priv.key` in **plain text**; anyone who can
+read that file can decrypt everything encrypted to the matching public key, no
+passphrase required. Only do this if the file's own storage is the sole
+protection you're relying on.
 
 ### 2. Verify you can restore (once, before relying on any backup)
 

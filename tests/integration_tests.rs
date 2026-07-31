@@ -135,6 +135,82 @@ fn test_wrong_password_fails() {
 }
 
 #[test]
+fn test_generate_keys_empty_password_stores_unencrypted() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_password("");
+
+    let pem_text = fs::read(&priv_key).unwrap();
+    let pem_text = String::from_utf8_lossy(&pem_text);
+    assert!(pem_text.contains("-----BEGIN PQENC PRIVATE KEY-----"),
+            "Private key should use the plain-text PEM header, got: {}", pem_text);
+    assert!(!pem_text.contains("ENCRYPTED"),
+            "Private key should not be marked encrypted, got: {}", pem_text);
+
+    let data = b"secret data";
+    let input_path = env.create_file("secret.txt", data);
+    let encrypted_path = env.file_path("secret.enc");
+    let decrypted_path = env.file_path("secret_dec.txt");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // No --passphrase and stdin closed: decrypt must not reach a password
+    // prompt at all for a plain-text key, or this would hang/fail on a
+    // closed-stdin read instead of succeeding.
+    let output = Command::new(pqenc_binary())
+        .args(&["decrypt",
+            "--decrypt", encrypted_path.to_str().unwrap(),
+            "--output", decrypted_path.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Decrypt of plain-text key failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read(&decrypted_path).unwrap(), data);
+}
+
+#[test]
+fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_password("");
+
+    let data = b"secret data";
+    let input_path = env.create_file("secret.txt", data);
+    let encrypted_path = env.file_path("secret.enc");
+    let decrypted_path = env.file_path("secret_dec.txt");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // A script that always passes a passphrase variable shouldn't need to
+    // special-case a plain-text key: the passphrase should just be ignored.
+    let output = Command::new(pqenc_binary())
+        .args(&["decrypt",
+            "--decrypt", encrypted_path.to_str().unwrap(),
+            "--output", decrypted_path.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap(),
+            "--passphrase", "some-unrelated-value"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Decrypt of plain-text key failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read(&decrypted_path).unwrap(), data);
+}
+
+#[test]
 fn test_file_format_has_magic_bytes() {
     let env = TempTestEnv::new();
     let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
@@ -423,7 +499,7 @@ fn test_generate_keys_rejects_occupied_path_before_prompting() {
             "Error should name the conflict, got: {}", stderr);
     // The whole point of the advisory pre-check: fail before spending ~1-2s on
     // key generation and making the user type a password twice.
-    assert!(!stderr.contains("Enter password for private key:"),
+    assert!(!stderr.contains("Enter passphrase for"),
             "Keygen prompted for a password before detecting the conflict: {}", stderr);
     assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
     assert!(!fresh.exists(), "Nothing should have been written to the other path");
@@ -437,7 +513,7 @@ fn test_generate_keys_rejects_occupied_path_before_prompting() {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     assert!(!output.status.success(), "Keygen must refuse an occupied path");
-    assert!(!stderr.contains("Enter password for private key:"),
+    assert!(!stderr.contains("Enter passphrase for"),
             "Keygen prompted before detecting the conflict: {}", stderr);
     assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
     assert!(!fresh.exists(), "Nothing should have been written to the other path");
