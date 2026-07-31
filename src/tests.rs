@@ -286,3 +286,88 @@
             assert!(result.is_ok());
         }
     }
+
+    // Fingerprint and randomart tests
+    mod fingerprint_tests {
+        use super::*;
+
+        #[test]
+        fn test_format_fingerprint_matches_ssh_keygen_style() {
+            let digest = [0u8; 32];
+            let formatted = format_fingerprint(&digest);
+
+            assert!(formatted.starts_with("SHA256:"));
+            assert!(!formatted.contains('='), "must be unpadded base64");
+            assert_eq!(
+                formatted,
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            );
+        }
+
+        #[test]
+        fn test_compute_fingerprint_deterministic_and_sensitive_to_input() {
+            let a = compute_fingerprint(b"same input");
+            let b = compute_fingerprint(b"same input");
+            let c = compute_fingerprint(b"different input");
+
+            assert_eq!(a, b);
+            assert_ne!(a, c);
+        }
+
+        #[test]
+        fn test_randomart_deterministic_and_well_formed() {
+            let digest = [0x42u8; 32];
+            let art1 = randomart(&digest, "ML-KEM-1024", "SHA256");
+            let art2 = randomart(&digest, "ML-KEM-1024", "SHA256");
+            assert_eq!(art1, art2, "same digest must produce identical randomart");
+
+            let lines: Vec<&str> = art1.lines().collect();
+            assert_eq!(lines.len(), 11, "top border + 9 rows + bottom border");
+            for line in &lines {
+                assert_eq!(line.chars().count(), 19, "every line is 19 chars wide: {}", line);
+            }
+            assert!(lines[0].starts_with("+--[ML-KEM-1024]--") && lines[0].ends_with('+'));
+            assert!(lines[10].starts_with("+----[SHA256]-----") && lines[10].ends_with('+'));
+            for row in &lines[1..10] {
+                assert!(row.starts_with('|') && row.ends_with('|'));
+            }
+        }
+
+        #[test]
+        fn test_randomart_differs_for_different_digests() {
+            let art_a = randomart(&[0u8; 32], "ML-KEM-1024", "SHA256");
+            let art_b = randomart(&[0xFFu8; 32], "ML-KEM-1024", "SHA256");
+            assert_ne!(art_a, art_b);
+        }
+
+        #[test]
+        fn test_extract_public_from_private_matches_generated_composite() {
+            // Build a synthetic ML-KEM secret key with a known "ek" embedded at
+            // the FIPS 203 offset, and a known X25519 secret, then verify
+            // reconstruction pulls out exactly the same public key bytes
+            // `generate_keys` would have stored.
+            use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+            let mut mlkem_sk = vec![0u8; MLKEM1024_PRIVATE_KEY_SIZE];
+            let embedded_ek = vec![0xABu8; MLKEM1024_PUBLIC_KEY_SIZE];
+            mlkem_sk[MLKEM1024_PUBLIC_KEY_OFFSET..MLKEM1024_PUBLIC_KEY_OFFSET + MLKEM1024_PUBLIC_KEY_SIZE]
+                .copy_from_slice(&embedded_ek);
+
+            let x25519_secret = StaticSecret::from([7u8; 32]);
+            let expected_x25519_pk = X25519PublicKey::from(&x25519_secret);
+            let x25519_sk_bytes = x25519_secret.to_bytes();
+
+            let composite_pub = extract_public_from_private(&mlkem_sk, &x25519_sk_bytes).unwrap();
+            let (mlkem_pk, x25519_pk) = parse_public_composite_key(&composite_pub).unwrap();
+
+            assert_eq!(mlkem_pk, embedded_ek);
+            assert_eq!(x25519_pk, *expected_x25519_pk.as_bytes());
+        }
+
+        #[test]
+        fn test_extract_public_from_private_rejects_wrong_size() {
+            let short_sk = vec![0u8; 100];
+            let x25519_sk = [0u8; 32];
+            assert!(extract_public_from_private(&short_sk, &x25519_sk).is_err());
+        }
+    }

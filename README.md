@@ -27,6 +27,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
 - **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
+- **Key fingerprints & randomart** - `ssh-keygen`-style `SHA256:` fingerprints and ASCII-art visualization, shown at key generation and encryption time and available on demand via `pqenc fingerprint`, so a mismatched keypair can be caught by eye instead of only at restore time
 
 ## Quick Start
 
@@ -46,12 +47,17 @@ pqenc generate-keys --public-key pub.key --private-key priv.key
 
 Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine that will be doing backups.
 
+Key generation prints a fingerprint and randomart image for the new keypair,
+in the style of `ssh-keygen`. Note it down (or compare it by eye against the
+randomart) so you can later confirm the `pub.key` on the backup machine still
+matches this `priv.key` — see the next two sections.
+
 **The passphrase cannot be recovered.** `priv.key` is stored encrypted, and the
 passphrase is the only thing that opens it. There is no recovery path, no escrow,
 and no way to strip encryption from an already-encrypted key without the
-passphrase — pqenc has exactly three commands, and none of them can help you
-here. Losing the passphrase destroys your backups just as completely as losing
-`priv.key` itself; neither half is any use without the other.
+passphrase — none of pqenc's commands can help you here. Losing the passphrase
+destroys your backups just as completely as losing `priv.key` itself; neither
+half is any use without the other.
 
 This is a deliberate design choice, and it means the passphrase should be stored
 **with** the offline private key rather than treated as an independent secret.
@@ -78,13 +84,18 @@ pqenc decrypt --private-key priv.key --decrypt test.pqe --output test.out
 cmp test.txt test.out && echo "restore verified"
 ```
 
-This is currently the only way to catch a mismatched keypair — a `pub.key` and
-`priv.key` that do not belong together, because keys were regenerated and only
-one file was copied, or the wrong file was grabbed. Nothing in the file format
-ties an encrypted file to a particular key, so encrypting to the wrong public key
-succeeds and reports success every time. The mismatch surfaces only when you try
-to restore, which may be months later. Repeat this check whenever you replace or
-move either key file.
+Nothing in the file format ties an encrypted file to a particular key, so
+encrypting to the wrong public key succeeds and reports success every time.
+This restore drill is the most thorough check, but not the only one:
+`pqenc encrypt` also prints the recipient key's fingerprint on every run, and
+`pqenc fingerprint --public-key pub.key` / `pqenc fingerprint --private-key
+priv.key` print it on demand for either half of a keypair. Run it on both
+machines after distributing a key and compare the `SHA256:...` line (or the
+randomart) by eye — a mismatch here means `pub.key` and `priv.key` do not
+belong together, likely because keys were regenerated and only one file was
+copied, or the wrong file was grabbed. Without one of these checks, a mismatch
+surfaces only when you try to restore, which may be months later. Repeat
+whichever check you use whenever you replace or move either key file.
 
 ### 3. Encrypt backups (regularly, on the backup machine)
 

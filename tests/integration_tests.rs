@@ -627,3 +627,121 @@ fn test_generate_keys_leaves_no_temp_artifacts() {
     assert!(leftovers.is_empty(),
             "Key generation left temp artifacts behind: {:?}", leftovers);
 }
+
+/// Extracts the "SHA256:<base64>" token from fingerprint/keygen/encrypt
+/// stdout, so tests can compare fingerprints without matching the rest of
+/// the surrounding text.
+fn extract_sha256_fingerprint(output: &str) -> &str {
+    let start = output.find("SHA256:").expect("output should contain a SHA256: fingerprint");
+    output[start..].split_whitespace().next().unwrap()
+}
+
+#[test]
+fn test_generate_keys_prints_fingerprint_and_randomart() {
+    let env = TempTestEnv::new();
+    let pub_key = env.file_path("pub.key");
+    let priv_key = env.file_path("priv.key");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["generate-keys",
+            "--public-key", pub_key.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap(),
+            "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Fingerprint: SHA256:"), "stdout: {}", stdout);
+    assert!(stdout.contains("The key's randomart image is:"), "stdout: {}", stdout);
+    assert!(stdout.contains("+--[ML-KEM-1024]--+"), "stdout: {}", stdout);
+    assert!(stdout.contains("+----[SHA256]-----+"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_fingerprint_command_matches_for_public_and_private_key() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let from_pub = Command::new(pqenc_binary())
+        .args(&["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(from_pub.status.success());
+    let from_pub_stdout = String::from_utf8_lossy(&from_pub.stdout).into_owned();
+
+    let from_priv = Command::new(pqenc_binary())
+        .args(&["fingerprint",
+            "--private-key", priv_key.to_str().unwrap(),
+            "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(from_priv.status.success());
+    let from_priv_stdout = String::from_utf8_lossy(&from_priv.stdout).into_owned();
+
+    assert_eq!(
+        extract_sha256_fingerprint(&from_pub_stdout),
+        extract_sha256_fingerprint(&from_priv_stdout),
+        "fingerprint from public and private key files must match for the same keypair"
+    );
+
+    assert!(from_pub_stdout.contains("The key's randomart image is:"));
+    assert!(from_priv_stdout.contains("The key's randomart image is:"));
+}
+
+#[test]
+fn test_fingerprint_requires_exactly_one_key_source() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    // Neither flag supplied.
+    let neither = Command::new(pqenc_binary())
+        .args(&["fingerprint"])
+        .output()
+        .unwrap();
+    assert!(!neither.status.success());
+
+    // Both flags supplied.
+    let both = Command::new(pqenc_binary())
+        .args(&["fingerprint",
+            "--public-key", pub_key.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+}
+
+#[test]
+fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let input_path = env.create_file("input.txt", b"hello");
+    let encrypted_path = env.file_path("input.enc");
+
+    let encrypt_output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(encrypt_output.status.success());
+    let encrypt_stdout = String::from_utf8_lossy(&encrypt_output.stdout).into_owned();
+
+    assert!(encrypt_stdout.contains("Recipient key fingerprint is:"), "stdout: {}", encrypt_stdout);
+    assert!(encrypt_stdout.contains("Recipient key's randomart image is:"), "stdout: {}", encrypt_stdout);
+
+    let fingerprint_output = Command::new(pqenc_binary())
+        .args(&["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let fingerprint_stdout = String::from_utf8_lossy(&fingerprint_output.stdout).into_owned();
+
+    assert_eq!(
+        extract_sha256_fingerprint(&encrypt_stdout),
+        extract_sha256_fingerprint(&fingerprint_stdout),
+        "encrypt should report the same fingerprint as the fingerprint command"
+    );
+}

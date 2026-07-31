@@ -36,7 +36,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use hkdf::Hkdf;
 use libcrux_ml_kem::mlkem1024;
 use rand::Rng;
@@ -72,6 +72,13 @@ const DISTRIBUTABLE_MODE: u32 = 0o666;
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
 const X25519_PRIVATE_KEY_SIZE: usize = 32;
 const SHARED_SECRET_SIZE: usize = 64; // KEM (32) + X25519 (32)
+
+// ML-KEM-1024 private key layout (FIPS 203 decapsulation key: dk_PKE(1536)
+// || ek(1568) || H(ek)(32) || z(32) = 3168 bytes), used to recover the
+// public key embedded in a private key file for fingerprinting.
+const MLKEM1024_PRIVATE_KEY_SIZE: usize = 3168;
+const MLKEM1024_PUBLIC_KEY_OFFSET: usize = 1536;
+const MLKEM1024_PUBLIC_KEY_SIZE: usize = 1568;
 
 // Passphrase-based encryption constants
 const ARGON2_MEMORY_COST: u32 = 65536; // 64 MiB
@@ -118,6 +125,10 @@ Examples:
 
   # Generate a keypair with no passphrase (e.g. disk already encrypted)
   pqenc generate-keys --public-key pub.key --private-key priv.key --passphrase \"\"
+
+  # Show a key's fingerprint and randomart (works on either half of a keypair)
+  pqenc fingerprint --public-key pub.key
+  pqenc fingerprint --private-key priv.key
 "
 )]
 struct Cli {
@@ -157,6 +168,25 @@ enum Commands {
             Pass an empty value to store/read the private key in plain text (not recommended).")]
         passphrase: Option<String>,
     },
+    Fingerprint {
+        #[command(flatten)]
+        key_source: KeySource,
+        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
+            Pass an empty value to read a plain-text private key (not recommended).")]
+        passphrase: Option<String>,
+    },
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct KeySource {
+    /// Public key file to fingerprint
+    #[arg(long, short = 'p')]
+    public_key: Option<String>,
+    /// Private key file to fingerprint (prompts for a passphrase if encrypted)
+    #[arg(long, short = 's')]
+    private_key: Option<String>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -428,6 +458,178 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveD
     Ok((mlkem_sk, x25519_sk))
 }
 
+/// SHA256 of the composite public key. Hashing the whole blob (both the
+/// ML-KEM and X25519 halves together) means drift in either sub-key changes
+/// the fingerprint, rather than just the half that drifted.
+fn compute_fingerprint(composite_pub_bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    Sha256::digest(composite_pub_bytes).into()
+}
+
+/// Formats a fingerprint digest the way `ssh-keygen` does: `SHA256:` followed
+/// by unpadded standard base64.
+fn format_fingerprint(digest: &[u8; 32]) -> String {
+    format!("SHA256:{}", BASE64_STANDARD_NO_PAD.encode(digest))
+}
+
+/// Reconstructs the composite public key from a parsed private key's two
+/// halves, so a private key file can be fingerprinted without the
+/// corresponding public key file.
+///
+/// The ML-KEM public key is embedded verbatim inside the ML-KEM secret key
+/// (FIPS 203's decapsulation-key layout: `dk_PKE(1536) || ek(1568) ||
+/// H(ek)(32) || z(32)`); the X25519 public key is a scalar-to-point
+/// derivation, mirroring `generate_keys`.
+fn extract_public_from_private(mlkem_sk: &[u8], x25519_sk: &[u8]) -> Result<Vec<u8>> {
+    use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+    if mlkem_sk.len() != MLKEM1024_PRIVATE_KEY_SIZE {
+        bail!("Invalid ML-KEM private key size");
+    }
+    let x25519_sk_bytes: [u8; X25519_PRIVATE_KEY_SIZE] = x25519_sk.try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid X25519 private key size"))?;
+
+    let mlkem_pk = &mlkem_sk[MLKEM1024_PUBLIC_KEY_OFFSET..MLKEM1024_PUBLIC_KEY_OFFSET + MLKEM1024_PUBLIC_KEY_SIZE];
+
+    let x25519_secret = StaticSecret::from(x25519_sk_bytes);
+    let x25519_public = X25519PublicKey::from(&x25519_secret);
+
+    let mut composite_pub = Vec::with_capacity(4 + mlkem_pk.len() + X25519_PUBLIC_KEY_SIZE);
+    composite_pub.extend_from_slice(&(mlkem_pk.len() as u32).to_be_bytes());
+    composite_pub.extend_from_slice(mlkem_pk);
+    composite_pub.extend_from_slice(x25519_public.as_bytes());
+
+    Ok(composite_pub)
+}
+
+/// Loads a private key from a PEM file, decrypting it with a passphrase if
+/// it is encrypted (prompting interactively unless one was supplied). A
+/// plain-text key ignores a supplied passphrase, since there is nothing to
+/// decrypt.
+fn load_private_key(private_key_path: &str, passphrase: Option<String>) -> Result<SensitiveData> {
+    let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
+
+    if pem_text.contains(PEM_PRIV_ENC_BEGIN) {
+        let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
+        let mut passphrase = match passphrase {
+            Some(p) => p,
+            None => {
+                let display_path = std::path::absolute(private_key_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| private_key_path.to_string());
+                eprintln!("Enter passphrase for \"{}\":", display_path);
+                rpassword::read_password()?
+            }
+        };
+        let result = decrypt_private_key(&encrypted_blob, passphrase.as_bytes());
+        passphrase.zeroize();
+        result
+    } else if pem_text.contains(PEM_PRIV_BEGIN) {
+        if let Some(mut p) = passphrase {
+            eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
+            p.zeroize();
+        }
+        Ok(SensitiveData::new(pem_decode(&pem_text, PEM_PRIV_BEGIN, PEM_PRIV_END)?))
+    } else {
+        if let Some(mut p) = passphrase {
+            p.zeroize();
+        }
+        bail!("Not a valid pqenc private key file: {}", private_key_path);
+    }
+}
+
+/// Renders an OpenSSH-style "drunken bishop" randomart image for a
+/// fingerprint digest: a 17x9 field walked 2 bits at a time (4 steps per
+/// input byte), bordered by a title and the hash algorithm name.
+fn randomart(digest: &[u8; 32], top_label: &str, bottom_label: &str) -> String {
+    const CHARS: &[u8] = b" .o+=*BOX@%&#/^SE";
+    const WIDTH: i32 = 17;
+    const HEIGHT: i32 = 9;
+
+    let mut field = vec![vec![0u8; HEIGHT as usize]; WIDTH as usize];
+    let mut x = WIDTH / 2;
+    let mut y = HEIGHT / 2;
+    let (start_x, start_y) = (x, y);
+    let len = CHARS.len() - 1;
+
+    for &byte in digest {
+        let mut input = byte;
+        for _ in 0..4 {
+            x = (x + if input & 0x1 != 0 { 1 } else { -1 }).clamp(0, WIDTH - 1);
+            y = (y + if input & 0x2 != 0 { 1 } else { -1 }).clamp(0, HEIGHT - 1);
+            let cell = &mut field[x as usize][y as usize];
+            if (*cell as usize) < len - 2 {
+                *cell += 1;
+            }
+            input >>= 2;
+        }
+    }
+    field[start_x as usize][start_y as usize] = (len - 1) as u8;
+    field[x as usize][y as usize] = len as u8;
+
+    let mut lines = Vec::with_capacity(HEIGHT as usize + 2);
+    lines.push(randomart_border(top_label, WIDTH as usize));
+    for row in 0..HEIGHT as usize {
+        let mut line = String::with_capacity(WIDTH as usize + 2);
+        line.push('|');
+        for col in 0..WIDTH as usize {
+            line.push(CHARS[field[col][row] as usize] as char);
+        }
+        line.push('|');
+        lines.push(line);
+    }
+    lines.push(randomart_border(bottom_label, WIDTH as usize));
+    lines.join("\n")
+}
+
+/// Builds a `+--[label]--+`-style border line, centering the bracketed label
+/// the same way OpenSSH does: `left = (width - label.len()) / 2`.
+fn randomart_border(label: &str, width: usize) -> String {
+    let label = format!("[{}]", label);
+    let dashes = width.saturating_sub(label.len());
+    let left = dashes / 2;
+    let right = dashes - left;
+    format!("+{}{}{}+", "-".repeat(left), label, "-".repeat(right))
+}
+
+/// Displays the fingerprint and randomart for a public or private key file.
+///
+/// Exactly one of `public_key_path`/`private_key_path` is supplied (enforced
+/// by the CLI's `KeySource` argument group). Both produce an identical
+/// fingerprint for the same keypair, since both ultimately hash the same
+/// composite public key bytes -- see `extract_public_from_private`.
+fn show_fingerprint(
+    public_key_path: Option<String>,
+    private_key_path: Option<String>,
+    passphrase: Option<String>,
+) -> Result<()> {
+    let (composite_pub, display_path) = if let Some(path) = public_key_path {
+        validate_path(&path, true, false, "Public key")?;
+        let pem_text = fs::read_to_string(&path).context("Failed to read public key")?;
+        let composite_pub = pem_decode(&pem_text, PEM_PUB_BEGIN, PEM_PUB_END)?;
+        // Validate structure so a corrupt or foreign file fails clearly.
+        parse_public_composite_key(&composite_pub)?;
+        (composite_pub, path)
+    } else if let Some(path) = private_key_path {
+        validate_path(&path, true, false, "Private key")?;
+        let composite_priv = load_private_key(&path, passphrase)?;
+        let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
+        let composite_pub = extract_public_from_private(&mlkem_sk.data, &x25519_sk.data)?;
+        (composite_pub, path)
+    } else {
+        unreachable!("clap enforces exactly one of --public-key/--private-key")
+    };
+
+    let digest = compute_fingerprint(&composite_pub);
+
+    println!("The key fingerprint is:");
+    println!("{} {}", format_fingerprint(&digest), display_path);
+    println!("The key's randomart image is:");
+    println!("{}", randomart(&digest, "ML-KEM-1024", "SHA256"));
+
+    Ok(())
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {:#}", e);
@@ -491,6 +693,9 @@ fn run() -> Result<()> {
         }
         Commands::Decrypt { input, output, private_key, passphrase } => {
             decrypt_file(&input, &output, &private_key, passphrase)?;
+        }
+        Commands::Fingerprint { key_source, passphrase } => {
+            show_fingerprint(key_source.public_key, key_source.private_key, passphrase)?;
         }
     }
 
@@ -665,6 +870,8 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     pub_guard.disarm();
     priv_guard.disarm();
 
+    let digest = compute_fingerprint(&composite_pub);
+
     println!("Key pair generated successfully");
     println!("  Public key:  {}", public_key_path);
     println!("  Private key: {}", private_key_path);
@@ -674,6 +881,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     } else {
         println!("  Private key is passphrase-protected");
     }
+    println!("  Fingerprint: {}", format_fingerprint(&digest));
+    println!();
+    println!("The key's randomart image is:");
+    println!("{}", randomart(&digest, "ML-KEM-1024", "SHA256"));
 
     Ok(())
 }
@@ -957,6 +1168,13 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     println!("  Output: {}", output_path);
     println!("  Using:  ML-KEM-1024 + X25519 + AES-256-GCM");
 
+    let digest = compute_fingerprint(&composite_bytes);
+    println!();
+    println!("Recipient key fingerprint is:");
+    println!("{}", format_fingerprint(&digest));
+    println!("Recipient key's randomart image is:");
+    println!("{}", randomart(&digest, "ML-KEM-1024", "SHA256"));
+
     Ok(())
 }
 
@@ -1023,35 +1241,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     let mut temp_guard = TempFileGuard::new(temp_path);
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
-    let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
-
-    let composite_priv = if pem_text.contains(PEM_PRIV_ENC_BEGIN) {
-        let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
-        let mut passphrase = match passphrase {
-            Some(p) => p,
-            None => {
-                let display_path = std::path::absolute(private_key_path)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| private_key_path.to_string());
-                eprintln!("Enter passphrase for \"{}\":", display_path);
-                rpassword::read_password()?
-            }
-        };
-        let result = decrypt_private_key(&encrypted_blob, passphrase.as_bytes());
-        passphrase.zeroize();
-        result?
-    } else if pem_text.contains(PEM_PRIV_BEGIN) {
-        if let Some(mut p) = passphrase {
-            eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
-            p.zeroize();
-        }
-        SensitiveData::new(pem_decode(&pem_text, PEM_PRIV_BEGIN, PEM_PRIV_END)?)
-    } else {
-        if let Some(mut p) = passphrase {
-            p.zeroize();
-        }
-        bail!("Not a valid pqenc private key file: {}", private_key_path);
-    };
+    let composite_priv = load_private_key(private_key_path, passphrase)?;
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;
