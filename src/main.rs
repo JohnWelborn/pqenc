@@ -1041,11 +1041,15 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
         passphrase.zeroize();
         result?
     } else if pem_text.contains(PEM_PRIV_BEGIN) {
-        if passphrase.is_some() {
+        if let Some(mut p) = passphrase {
             eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
+            p.zeroize();
         }
         SensitiveData::new(pem_decode(&pem_text, PEM_PRIV_BEGIN, PEM_PRIV_END)?)
     } else {
+        if let Some(mut p) = passphrase {
+            p.zeroize();
+        }
         bail!("Not a valid pqenc private key file: {}", private_key_path);
     };
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
