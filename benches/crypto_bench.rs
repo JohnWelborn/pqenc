@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const BENCH_PASSWORD: &str = "bench-password";
+const BENCH_PASSPHRASE: &str = "bench-passphrase";
 
 fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
@@ -27,7 +27,7 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
             .args(&["generate-keys",
                 "--public-key", pub_key.to_str().unwrap(),
                 "--private-key", priv_key.to_str().unwrap(),
-                "--passphrase", BENCH_PASSWORD])
+                "--passphrase", BENCH_PASSPHRASE])
             .output()
             .expect("Failed to generate benchmark keys");
 
@@ -110,7 +110,7 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
                             "--decrypt", encrypted_path.to_str().unwrap(),
                             "--output", output_path.to_str().unwrap(),
                             "--private-key", priv_key.to_str().unwrap(),
-                            "--passphrase", BENCH_PASSWORD])
+                            "--passphrase", BENCH_PASSPHRASE])
                         .output()
                         .unwrap();
 
@@ -139,7 +139,7 @@ fn benchmark_key_generation(c: &mut Criterion) {
                 .args(&["generate-keys",
                     "--public-key", pub_key.to_str().unwrap(),
                     "--private-key", priv_key.to_str().unwrap(),
-                    "--passphrase", BENCH_PASSWORD])
+                    "--passphrase", BENCH_PASSPHRASE])
                 .output()
                 .unwrap();
 

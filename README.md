@@ -13,7 +13,7 @@ pqenc is designed for encrypting backups and archives using asymmetric encryptio
 The intended workflow is:
 
 - **The backup machine** holds only the public key and runs encryption. If this machine is ever compromised, the attacker cannot decrypt any of the backup data.
-- **The private key** is generated once and stored securely offline — on an encrypted drive, hardware token, or air-gapped computer, together with the password protecting it. It is only needed when restoring data.
+- **The private key** is generated once and stored securely offline — on an encrypted drive, hardware token, or air-gapped computer, together with the passphrase protecting it. It is only needed when restoring data.
 - **Encryption can run unattended** (e.g. as a cron job or scheduled task) since it only requires the public key.
 
 Using ML-KEM-1024 ensures that the encrypted data remains secure against future quantum computers, which can break the RSA and ECC algorithms used by most current encryption tools.
@@ -46,17 +46,17 @@ pqenc generate-keys --public-key pub.key --private-key priv.key
 
 Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine that will be doing backups.
 
-**The password cannot be recovered.** `priv.key` is stored encrypted, and the
-password is the only thing that opens it. There is no recovery path, no escrow,
+**The passphrase cannot be recovered.** `priv.key` is stored encrypted, and the
+passphrase is the only thing that opens it. There is no recovery path, no escrow,
 and no way to strip encryption from an already-encrypted key without the
-password — pqenc has exactly three commands, and none of them can help you
-here. Losing the password destroys your backups just as completely as losing
+passphrase — pqenc has exactly three commands, and none of them can help you
+here. Losing the passphrase destroys your backups just as completely as losing
 `priv.key` itself; neither half is any use without the other.
 
-This is a deliberate design choice, and it means the password should be stored
+This is a deliberate design choice, and it means the passphrase should be stored
 **with** the offline private key rather than treated as an independent secret.
 The two defend against different threats — the encrypted file protects against
-someone who obtains your backups, the password protects against someone who
+someone who obtains your backups, the passphrase protects against someone who
 obtains the file — and neither threat is the one pqenc is built around. An
 attacker who compromises the backup machine gets only `pub.key` either way.
 

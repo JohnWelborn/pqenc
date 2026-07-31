@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TempTestEnv, TEST_PASSWORD};
+use helpers::{TempTestEnv, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
 
@@ -10,7 +10,7 @@ fn pqenc_binary() -> String {
 #[test]
 fn test_truncation_attack_detected() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for truncation");
     let encrypted_path = env.file_path("test.enc");
@@ -34,10 +34,10 @@ fn test_truncation_attack_detected() {
     fs::write(&encrypted_path, encrypted).unwrap();
 
     // Try to decrypt - should fail
-    let result = env.decrypt_file_with_password(
+    let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     );
 
     assert!(result.is_err(), "Truncation attack should be detected");
@@ -46,7 +46,7 @@ fn test_truncation_attack_detected() {
 #[test]
 fn test_bit_flip_detected() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for bit flip");
     let encrypted_path = env.file_path("test.enc");
@@ -70,10 +70,10 @@ fn test_bit_flip_detected() {
     fs::write(&encrypted_path, encrypted).unwrap();
 
     // Try to decrypt - should fail
-    let result = env.decrypt_file_with_password(
+    let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     );
 
     assert!(result.is_err(), "Bit flip attack should be detected");
@@ -82,7 +82,7 @@ fn test_bit_flip_detected() {
 #[test]
 fn test_encryption_is_nondeterministic() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"same data");
     let enc1_path = env.file_path("enc1.enc");
@@ -111,7 +111,7 @@ fn test_encryption_is_nondeterministic() {
 #[test]
 fn test_invalid_magic_bytes_rejected() {
     let env = TempTestEnv::new();
-    env.generate_keys_with_password(TEST_PASSWORD);
+    env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     // Create file with invalid magic bytes
     let mut bad_data = b"XXX1".to_vec();
@@ -120,10 +120,10 @@ fn test_invalid_magic_bytes_rejected() {
     let bad_path = env.create_file("bad.enc", &bad_data);
     let out_path = env.file_path("out.txt");
 
-    let result = env.decrypt_file_with_password(
+    let result = env.decrypt_file_with_passphrase(
         bad_path.to_str().unwrap(),
         out_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     );
 
     assert!(result.is_err(), "Invalid magic bytes should be rejected");
@@ -132,7 +132,7 @@ fn test_invalid_magic_bytes_rejected() {
 #[test]
 fn test_header_tampering_detected() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data");
     let encrypted_path = env.file_path("test.enc");
@@ -157,10 +157,10 @@ fn test_header_tampering_detected() {
     }
 
     // Try to decrypt - should fail
-    let result = env.decrypt_file_with_password(
+    let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     );
 
     assert!(result.is_err(), "Header tampering should be detected");
@@ -169,7 +169,7 @@ fn test_header_tampering_detected() {
 #[test]
 fn test_ciphertext_tampering_detected() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for ciphertext tampering");
     let encrypted_path = env.file_path("test.enc");
@@ -193,10 +193,10 @@ fn test_ciphertext_tampering_detected() {
     fs::write(&encrypted_path, encrypted).unwrap();
 
     // Try to decrypt - should fail due to GCM authentication
-    let result = env.decrypt_file_with_password(
+    let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     );
 
     assert!(result.is_err(), "Ciphertext tampering should be detected");

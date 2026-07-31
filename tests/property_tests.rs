@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TestData, TempTestEnv, TEST_PASSWORD};
+use helpers::{TestData, TempTestEnv, TEST_PASSPHRASE};
 use proptest::prelude::*;
 use std::fs;
 use std::process::Command;
@@ -16,7 +16,7 @@ proptest! {
         size in 1usize..1024*1024 // Test sizes from 1 byte to 1 MB
     ) {
         let env = TempTestEnv::new();
-        let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+        let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
         let data = TestData::random(size);
         let input_path = env.create_file("input.bin", &data.plaintext);
@@ -35,10 +35,10 @@ proptest! {
         prop_assert!(output.status.success(), "Encryption failed for size {}", size);
 
         // Decrypt
-        let decrypt_result = env.decrypt_file_with_password(
+        let decrypt_result = env.decrypt_file_with_passphrase(
             encrypted_path.to_str().unwrap(),
             decrypted_path.to_str().unwrap(),
-            TEST_PASSWORD
+            TEST_PASSPHRASE
         );
 
         prop_assert!(decrypt_result.is_ok(), "Decryption failed for size {}", size);
@@ -56,7 +56,7 @@ proptest! {
         chunks in 1usize..20 // Test 1 to 20 chunks
     ) {
         let env = TempTestEnv::new();
-        let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+        let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
         let chunk_size = 64 * 1024;
         let size = chunks * chunk_size;
@@ -77,10 +77,10 @@ proptest! {
         prop_assert!(output.status.success(), "Encryption failed for {} chunks", chunks);
 
         // Decrypt
-        let decrypt_result = env.decrypt_file_with_password(
+        let decrypt_result = env.decrypt_file_with_passphrase(
             encrypted_path.to_str().unwrap(),
             decrypted_path.to_str().unwrap(),
-            TEST_PASSWORD
+            TEST_PASSPHRASE
         );
 
         prop_assert!(decrypt_result.is_ok(), "Decryption failed for {} chunks", chunks);
@@ -98,7 +98,7 @@ proptest! {
         offset in 0usize..1024 // Vary size around chunk boundary
     ) {
         let env = TempTestEnv::new();
-        let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+        let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
         let chunk_size = 64 * 1024;
         let size = chunk_size + offset;
@@ -119,10 +119,10 @@ proptest! {
         prop_assert!(output.status.success(), "Encryption failed for size {}", size);
 
         // Decrypt
-        let decrypt_result = env.decrypt_file_with_password(
+        let decrypt_result = env.decrypt_file_with_passphrase(
             encrypted_path.to_str().unwrap(),
             decrypted_path.to_str().unwrap(),
-            TEST_PASSWORD
+            TEST_PASSPHRASE
         );
 
         prop_assert!(decrypt_result.is_ok(), "Decryption failed for size {}", size);

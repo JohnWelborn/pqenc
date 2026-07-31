@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TestData, TempTestEnv, TEST_PASSWORD};
+use helpers::{TestData, TempTestEnv, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
 
@@ -10,7 +10,7 @@ fn pqenc_binary() -> String {
 #[test]
 fn test_full_workflow_small_file() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_data = TestData::text("Hello, post-quantum world!");
     let input_path = env.create_file("input.txt", &input_data.plaintext);
@@ -30,10 +30,10 @@ fn test_full_workflow_small_file() {
             String::from_utf8_lossy(&output.stderr));
 
     // Decrypt
-    env.decrypt_file_with_password(
+    env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     ).unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
@@ -43,7 +43,7 @@ fn test_full_workflow_small_file() {
 #[test]
 fn test_empty_file() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("empty.txt", b"");
     let encrypted_path = env.file_path("empty.enc");
@@ -61,10 +61,10 @@ fn test_empty_file() {
     assert!(output.status.success());
 
     // Decrypt
-    env.decrypt_file_with_password(
+    env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     ).unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
@@ -74,7 +74,7 @@ fn test_empty_file() {
 #[test]
 fn test_exactly_one_chunk() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let data = vec![0x42; 64 * 1024];
     let input_path = env.create_file("onechunk.bin", &data);
@@ -93,10 +93,10 @@ fn test_exactly_one_chunk() {
     assert!(output.status.success());
 
     // Decrypt
-    env.decrypt_file_with_password(
+    env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     ).unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
@@ -104,9 +104,9 @@ fn test_exactly_one_chunk() {
 }
 
 #[test]
-fn test_wrong_password_fails() {
+fn test_wrong_passphrase_fails() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
@@ -124,20 +124,20 @@ fn test_wrong_password_fails() {
 
     assert!(output.status.success());
 
-    // Try to decrypt with wrong password
-    let result = env.decrypt_file_with_password(
+    // Try to decrypt with wrong passphrase
+    let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        "wrong-password"
+        "wrong-passphrase"
     );
 
     assert!(result.is_err());
 }
 
 #[test]
-fn test_generate_keys_empty_password_stores_unencrypted() {
+fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     let env = TempTestEnv::new();
-    let (pub_key, priv_key) = env.generate_keys_with_password("");
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase("");
 
     let pem_text = fs::read(&priv_key).unwrap();
     let pem_text = String::from_utf8_lossy(&pem_text);
@@ -160,7 +160,7 @@ fn test_generate_keys_empty_password_stores_unencrypted() {
         .unwrap();
     assert!(output.status.success());
 
-    // No --passphrase and stdin closed: decrypt must not reach a password
+    // No --passphrase and stdin closed: decrypt must not reach a passphrase
     // prompt at all for a plain-text key, or this would hang/fail on a
     // closed-stdin read instead of succeeding.
     let output = Command::new(pqenc_binary())
@@ -179,7 +179,7 @@ fn test_generate_keys_empty_password_stores_unencrypted() {
 #[test]
 fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     let env = TempTestEnv::new();
-    let (pub_key, priv_key) = env.generate_keys_with_password("");
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase("");
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
@@ -213,7 +213,7 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
 #[test]
 fn test_file_format_has_magic_bytes() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test");
     let encrypted_path = env.file_path("test.enc");
@@ -236,7 +236,7 @@ fn test_file_format_has_magic_bytes() {
 #[test]
 fn test_large_file_multiple_chunks() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let data = TestData::random(10 * 1024 * 1024); // 10MB - multiple chunks
     let input_path = env.create_file("large.bin", &data.plaintext);
@@ -256,10 +256,10 @@ fn test_large_file_multiple_chunks() {
             String::from_utf8_lossy(&output.stderr));
 
     // Decrypt
-    env.decrypt_file_with_password(
+    env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     ).unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
@@ -278,7 +278,7 @@ fn temp_artifacts(dir: &std::path::Path) -> Vec<String> {
 #[test]
 fn test_encrypt_refuses_existing_output() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("input.txt", b"data to encrypt");
 
@@ -310,7 +310,7 @@ fn test_encrypt_refuses_existing_output() {
 #[test]
 fn test_encrypt_success_leaves_no_temp_file() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let data = TestData::random(256 * 1024); // spans multiple 64KB chunks
     let input_path = env.create_file("input.bin", &data.plaintext);
@@ -335,10 +335,10 @@ fn test_encrypt_success_leaves_no_temp_file() {
             "Successful run left temp artifacts behind: {:?}", leftovers);
 
     // The renamed file must still be the real, decryptable output.
-    env.decrypt_file_with_password(
+    env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSWORD
+        TEST_PASSPHRASE
     ).unwrap();
     assert_eq!(fs::read(&decrypted_path).unwrap(), data.plaintext);
 }
@@ -349,7 +349,7 @@ fn test_encrypted_output_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("input.txt", b"permission check");
     let encrypted_path = env.file_path("perms.enc");
@@ -389,7 +389,7 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     use std::time::{Duration, Instant};
 
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
     let encrypted_path = env.file_path("interrupted.enc");
     let dir = encrypted_path.parent().unwrap().to_path_buf();
 
@@ -452,7 +452,7 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
 }
 
 /// Run `generate-keys` with stdin closed. Only for checks that must fail
-/// *before* the password prompt — reaching the prompt with no stdin produces an
+/// *before* the passphrase prompt — reaching the prompt with no stdin produces an
 /// unrelated read error, which would make a test pass for the wrong reason.
 fn run_generate_keys(pub_path: &std::path::Path, priv_path: &std::path::Path)
     -> std::process::Output
@@ -477,7 +477,7 @@ fn run_generate_keys_answering_prompts(
         .args(&["generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSWORD])
+            "--passphrase", TEST_PASSPHRASE])
         .output()
         .unwrap()
 }
@@ -498,9 +498,9 @@ fn test_generate_keys_rejects_occupied_path_before_prompting() {
     assert!(stderr.contains("already exists"),
             "Error should name the conflict, got: {}", stderr);
     // The whole point of the advisory pre-check: fail before spending ~1-2s on
-    // key generation and making the user type a password twice.
+    // key generation and making the user type a passphrase twice.
     assert!(!stderr.contains("Enter passphrase for"),
-            "Keygen prompted for a password before detecting the conflict: {}", stderr);
+            "Keygen prompted for a passphrase before detecting the conflict: {}", stderr);
     assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
     assert!(!fresh.exists(), "Nothing should have been written to the other path");
 
@@ -530,7 +530,7 @@ fn test_generate_keys_rejects_identical_paths() {
     assert!(!output.status.success(),
             "Keygen must refuse to write both keys to one path");
     // Assert the specific diagnosis, not merely that something failed: with no
-    // stdin, reaching the password prompt also fails, which would let this pass
+    // stdin, reaching the passphrase prompt also fails, which would let this pass
     // for an unrelated reason.
     assert!(stderr.contains("must differ"),
             "Error should name the identical-path conflict, got: {}", stderr);
@@ -564,7 +564,7 @@ fn test_generate_keys_leaves_no_public_key_when_private_write_fails() {
     let priv_path = locked_dir.join("priv.key");
 
     // Must answer the prompts: the failure under test happens at the file
-    // writes, which are only reached after the password is accepted.
+    // writes, which are only reached after the passphrase is accepted.
     let output = run_generate_keys_answering_prompts(&pub_path, &priv_path);
 
     // Restore before asserting so a failure cannot leave an undeletable TempDir.
@@ -598,7 +598,7 @@ fn test_generate_keys_key_file_permissions() {
         .args(&["generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSWORD])
+            "--passphrase", TEST_PASSPHRASE])
         .output()
         .unwrap();
     assert!(output.status.success(), "Key generation failed: {}",
@@ -617,7 +617,7 @@ fn test_generate_keys_key_file_permissions() {
 #[test]
 fn test_generate_keys_leaves_no_temp_artifacts() {
     let env = TempTestEnv::new();
-    let (pub_key, _) = env.generate_keys_with_password(TEST_PASSWORD);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     // Keys are written in place rather than staged through temp files. Key
     // files share a directory with encrypted output in these tests, so a future

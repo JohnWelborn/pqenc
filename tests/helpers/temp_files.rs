@@ -28,7 +28,7 @@ impl TempTestEnv {
         path
     }
 
-    pub fn generate_keys_with_password(&self, password: &str) -> (PathBuf, PathBuf) {
+    pub fn generate_keys_with_passphrase(&self, passphrase: &str) -> (PathBuf, PathBuf) {
         use std::process::Command;
 
         let binary = env!("CARGO_BIN_EXE_pqenc");
@@ -38,7 +38,7 @@ impl TempTestEnv {
                 "generate-keys",
                 "--public-key", self.pub_key_path.to_str().unwrap(),
                 "--private-key", self.priv_key_path.to_str().unwrap(),
-                "--passphrase", password,
+                "--passphrase", passphrase,
             ])
             .output()
             .expect("Failed to generate keys");
@@ -50,11 +50,11 @@ impl TempTestEnv {
         (self.pub_key_path.clone(), self.priv_key_path.clone())
     }
 
-    pub fn decrypt_file_with_password(
+    pub fn decrypt_file_with_passphrase(
         &self,
         input: &str,
         output: &str,
-        password: &str
+        passphrase: &str
     ) -> Result<(), String> {
         use std::process::Command;
 
@@ -66,7 +66,7 @@ impl TempTestEnv {
                 "--decrypt", input,
                 "--output", output,
                 "--private-key", self.priv_key_path.to_str().unwrap(),
-                "--passphrase", password,
+                "--passphrase", passphrase,
             ])
             .output()
             .map_err(|e| format!("Failed to run decrypt: {}", e))?;

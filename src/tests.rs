@@ -51,45 +51,45 @@
         }
     }
 
-    // Password derivation tests
-    mod password_tests {
+    // Passphrase derivation tests
+    mod passphrase_tests {
         use super::*;
 
         #[test]
         fn test_derive_key_deterministic() {
-            let password = b"test-password";
+            let passphrase = b"test-passphrase";
             let salt = [42u8; ARGON2_SALT_SIZE];
 
-            let key1 = derive_key_from_password(password, &salt).unwrap();
-            let key2 = derive_key_from_password(password, &salt).unwrap();
+            let key1 = derive_key_from_passphrase(passphrase, &salt).unwrap();
+            let key2 = derive_key_from_passphrase(passphrase, &salt).unwrap();
 
             assert_eq!(key1.data, key2.data);
         }
 
         #[test]
         fn test_derive_key_different_salts() {
-            let password = b"test-password";
+            let passphrase = b"test-passphrase";
             let salt1 = [1u8; ARGON2_SALT_SIZE];
             let salt2 = [2u8; ARGON2_SALT_SIZE];
 
-            let key1 = derive_key_from_password(password, &salt1).unwrap();
-            let key2 = derive_key_from_password(password, &salt2).unwrap();
+            let key1 = derive_key_from_passphrase(passphrase, &salt1).unwrap();
+            let key2 = derive_key_from_passphrase(passphrase, &salt2).unwrap();
 
             assert_ne!(key1.data, key2.data);
         }
 
         #[test]
-        fn test_derive_key_empty_password() {
+        fn test_derive_key_empty_passphrase() {
             let salt = [0u8; ARGON2_SALT_SIZE];
-            let result = derive_key_from_password(b"", &salt);
+            let result = derive_key_from_passphrase(b"", &salt);
             assert!(result.is_err());
         }
 
         #[test]
         fn test_derive_key_output_length() {
-            let password = b"password";
+            let passphrase = b"passphrase";
             let salt = [0u8; ARGON2_SALT_SIZE];
-            let key = derive_key_from_password(password, &salt).unwrap();
+            let key = derive_key_from_passphrase(passphrase, &salt).unwrap();
             assert_eq!(key.data.len(), ARGON2_KEY_LENGTH);
         }
     }
@@ -101,10 +101,10 @@
         #[test]
         fn test_encrypt_decrypt_roundtrip() {
             let original = b"secret private key data";
-            let password = b"secure-password";
+            let passphrase = b"secure-passphrase";
 
-            let encrypted = encrypt_private_key(original, password).unwrap();
-            let decrypted = decrypt_private_key(&encrypted, password).unwrap();
+            let encrypted = encrypt_private_key(original, passphrase).unwrap();
+            let decrypted = decrypt_private_key(&encrypted, passphrase).unwrap();
 
             assert_eq!(decrypted.data, original);
         }
@@ -112,21 +112,21 @@
         #[test]
         fn test_encrypt_produces_different_output() {
             let key = b"private key";
-            let password = b"password";
+            let passphrase = b"passphrase";
 
-            let enc1 = encrypt_private_key(key, password).unwrap();
-            let enc2 = encrypt_private_key(key, password).unwrap();
+            let enc1 = encrypt_private_key(key, passphrase).unwrap();
+            let enc2 = encrypt_private_key(key, passphrase).unwrap();
 
             assert_ne!(enc1, enc2);
         }
 
         #[test]
-        fn test_decrypt_wrong_password() {
+        fn test_decrypt_wrong_passphrase() {
             let key = b"secret";
-            let password = b"correct";
+            let passphrase = b"correct";
             let wrong = b"wrong";
 
-            let encrypted = encrypt_private_key(key, password).unwrap();
+            let encrypted = encrypt_private_key(key, passphrase).unwrap();
             let result = decrypt_private_key(&encrypted, wrong);
 
             assert!(result.is_err());
@@ -135,13 +135,13 @@
         #[test]
         fn test_decrypt_corrupted() {
             let key = b"secret";
-            let password = b"password";
+            let passphrase = b"passphrase";
 
-            let mut encrypted = encrypt_private_key(key, password).unwrap();
+            let mut encrypted = encrypt_private_key(key, passphrase).unwrap();
             let pos = encrypted.len() / 2;
             encrypted[pos] ^= 0xFF;
 
-            let result = decrypt_private_key(&encrypted, password);
+            let result = decrypt_private_key(&encrypted, passphrase);
             assert!(result.is_err());
         }
     }

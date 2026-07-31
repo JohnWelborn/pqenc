@@ -50,7 +50,7 @@ cargo bench
 ### Unit Tests (24 tests in `src/tests.rs`)
 Tests internal utility functions and crypto operations:
 - PEM encoding/decoding
-- Password derivation (Argon2id)
+- Passphrase derivation (Argon2id)
 - Private key encryption/decryption
 - Composite key parsing (ML-KEM-1024 + X25519)
 - AES key derivation (HKDF)
@@ -62,7 +62,7 @@ Tests full encrypt/decrypt workflows via the CLI:
 - Empty file handling
 - Chunk boundary cases (64KB chunks)
 - Large multi-chunk files (10MB)
-- Wrong password rejection
+- Wrong passphrase rejection
 - File format validation (magic bytes)
 
 ### Security Tests (6 tests in `tests/security_tests.rs`)
@@ -87,8 +87,8 @@ Tests with randomized inputs using proptest:
 
 ## Test Implementation Notes
 
-### Password Handling in Tests
-Integration and security tests supply the private-key password non-interactively via `pqenc`'s `--passphrase` flag, so no interactive prompt (and no external `expect` dependency) is involved. The test helpers in `tests/helpers/` wrap this in `generate_keys_with_password`/`decrypt_file_with_password`.
+### Passphrase Handling in Tests
+Integration and security tests supply the private-key passphrase non-interactively via `pqenc`'s `--passphrase` flag, so no interactive prompt (and no external `expect` dependency) is involved. The test helpers in `tests/helpers/` wrap this in `generate_keys_with_passphrase`/`decrypt_file_with_passphrase`.
 
 ### Test Data Generation
 The `TestData` helper in `tests/helpers/test_data.rs` provides utilities for generating:
@@ -100,6 +100,6 @@ The `TestData` helper in `tests/helpers/test_data.rs` provides utilities for gen
 ### Temporary Test Environments
 The `TempTestEnv` helper in `tests/helpers/temp_files.rs` manages:
 - Temporary directories (auto-cleaned on drop)
-- Key generation with passwords
+- Key generation with passphrases
 - File creation
 - Encryption/decryption workflows

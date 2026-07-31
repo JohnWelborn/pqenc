@@ -73,7 +73,7 @@ const X25519_PUBLIC_KEY_SIZE: usize = 32;
 const X25519_PRIVATE_KEY_SIZE: usize = 32;
 const SHARED_SECRET_SIZE: usize = 64; // KEM (32) + X25519 (32)
 
-// Password-based encryption constants
+// Passphrase-based encryption constants
 const ARGON2_MEMORY_COST: u32 = 65536; // 64 MiB
 const ARGON2_TIME_COST: u32 = 3;
 const ARGON2_PARALLELISM: u32 = 4;
@@ -301,12 +301,12 @@ fn pem_decode(pem_text: &str, begin: &str, end: &str) -> Result<Vec<u8>> {
         .context("Failed to decode base64")
 }
 
-/// Derive encryption key from password using Argon2id
-fn derive_key_from_password(password: &[u8], salt: &[u8]) -> Result<SensitiveData> {
+/// Derive encryption key from passphrase using Argon2id
+fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveData> {
     use argon2::{Argon2, Algorithm, Version, Params};
 
-    if password.is_empty() {
-        bail!("Password cannot be empty");
+    if passphrase.is_empty() {
+        bail!("Passphrase cannot be empty");
     }
     if salt.len() != ARGON2_SALT_SIZE {
         bail!("Invalid salt size");
@@ -321,18 +321,18 @@ fn derive_key_from_password(password: &[u8], salt: &[u8]) -> Result<SensitiveDat
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = vec![0u8; ARGON2_KEY_LENGTH];
-    argon2.hash_password_into(password, salt, &mut key)
+    argon2.hash_password_into(passphrase, salt, &mut key)
         .map_err(|e| anyhow::anyhow!("Argon2 failed: {}", e))?;
 
     Ok(SensitiveData::new(key))
 }
 
-/// Encrypt composite private key with password
-fn encrypt_private_key(composite_key: &[u8], password: &[u8]) -> Result<Vec<u8>> {
+/// Encrypt composite private key with passphrase
+fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8>> {
     use rand::RngExt;
 
     let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
-    let key = derive_key_from_password(password, &salt)?;
+    let key = derive_key_from_passphrase(passphrase, &salt)?;
 
     let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
@@ -354,8 +354,8 @@ fn encrypt_private_key(composite_key: &[u8], password: &[u8]) -> Result<Vec<u8>>
     Ok(result)
 }
 
-/// Decrypt private key with password
-fn decrypt_private_key(encrypted_blob: &[u8], password: &[u8]) -> Result<SensitiveData> {
+/// Decrypt private key with passphrase
+fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
     let min_size = ARGON2_SALT_SIZE + PBE_NONCE_SIZE + 1 + 16; // +16 for GCM tag
     if encrypted_blob.len() < min_size {
         bail!("Encrypted data too short");
@@ -365,7 +365,7 @@ fn decrypt_private_key(encrypted_blob: &[u8], password: &[u8]) -> Result<Sensiti
     let nonce = &encrypted_blob[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + PBE_NONCE_SIZE];
     let ciphertext = &encrypted_blob[ARGON2_SALT_SIZE + PBE_NONCE_SIZE..];
 
-    let key = derive_key_from_password(password, salt)?;
+    let key = derive_key_from_passphrase(passphrase, salt)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
 
     let plaintext = cipher.decrypt(
@@ -374,7 +374,7 @@ fn decrypt_private_key(encrypted_blob: &[u8], password: &[u8]) -> Result<Sensiti
             msg: ciphertext,
             aad: b"pqenc-private-key-v1",
         }
-    ).map_err(|_| anyhow::anyhow!("Decryption failed - wrong password or corrupted key"))?;
+    ).map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;
 
     Ok(SensitiveData::new(plaintext))
 }
@@ -535,8 +535,8 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     // Advisory pre-check, in addition to (never instead of) the exclusive create
     // below. Losing this race only changes which error message the user sees; it
     // can never cause a file to be clobbered. Running it here, before ~1-2s of
-    // key generation and both password prompts, is the entire point: otherwise
-    // the user types a password twice before learning the path was occupied.
+    // key generation and both passphrase prompts, is the entire point: otherwise
+    // the user types a passphrase twice before learning the path was occupied.
     //
     // symlink_metadata rather than exists(): exists() follows symlinks and
     // reports false for a dangling one, where O_EXCL still fails EEXIST.
@@ -583,7 +583,7 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
         .unwrap_or_else(|_| private_key_path.to_string());
 
     // Prompt for a passphrase, unless one was supplied on the command line.
-    let (mut password1, mut password2) = match passphrase {
+    let (mut passphrase1, mut passphrase2) = match passphrase {
         Some(p) => (p.clone(), p),
         None => {
             eprintln!("Enter passphrase for \"{}\" (empty for no passphrase):", display_priv_path);
@@ -594,28 +594,28 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
         }
     };
 
-    if password1 != password2 {
-        password1.zeroize();
-        password2.zeroize();
+    if passphrase1 != passphrase2 {
+        passphrase1.zeroize();
+        passphrase2.zeroize();
         bail!("Passphrases do not match");
     }
-    let unencrypted = password1.is_empty();
+    let unencrypted = passphrase1.is_empty();
     if unencrypted {
         eprintln!("WARNING: \"{}\" will be stored plain text.", display_priv_path);
-    } else if password1.len() < 12 {
-        eprintln!("Warning: Password shorter than 12 characters may be weak");
+    } else if passphrase1.len() < 12 {
+        eprintln!("Warning: Passphrase shorter than 12 characters may be weak");
     }
 
     // Encrypt the private key, unless an empty passphrase opted out of encryption.
     let pem_priv = if unencrypted {
-        password1.zeroize();
-        password2.zeroize();
+        passphrase1.zeroize();
+        passphrase2.zeroize();
         pem_encode(&composite_priv, PEM_PRIV_BEGIN, PEM_PRIV_END)
     } else {
         let encrypted_priv = {
-            let result = encrypt_private_key(&composite_priv, password1.as_bytes());
-            password1.zeroize();
-            password2.zeroize();
+            let result = encrypt_private_key(&composite_priv, passphrase1.as_bytes());
+            passphrase1.zeroize();
+            passphrase2.zeroize();
             result?
         };
         pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)
@@ -1027,7 +1027,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
 
     let composite_priv = if pem_text.contains(PEM_PRIV_ENC_BEGIN) {
         let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
-        let mut password = match passphrase {
+        let mut passphrase = match passphrase {
             Some(p) => p,
             None => {
                 let display_path = std::path::absolute(private_key_path)
@@ -1037,8 +1037,8 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
                 rpassword::read_password()?
             }
         };
-        let result = decrypt_private_key(&encrypted_blob, password.as_bytes());
-        password.zeroize();
+        let result = decrypt_private_key(&encrypted_blob, passphrase.as_bytes());
+        passphrase.zeroize();
         result?
     } else if pem_text.contains(PEM_PRIV_BEGIN) {
         if passphrase.is_some() {

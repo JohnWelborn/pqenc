@@ -4,9 +4,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-const TEST_PASSWORD: &str = "test-tar-password";
+const TEST_PASSPHRASE: &str = "test-tar-passphrase";
 
-fn generate_keys_with_password(pub_path: &Path, priv_path: &Path) {
+fn generate_keys_with_passphrase(pub_path: &Path, priv_path: &Path) {
     let binary = env!("CARGO_BIN_EXE_pqenc");
 
     let output = Command::new(binary)
@@ -14,7 +14,7 @@ fn generate_keys_with_password(pub_path: &Path, priv_path: &Path) {
             "generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSWORD,
+            "--passphrase", TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to generate keys");
@@ -49,7 +49,7 @@ fn test_encrypt_directory_via_tar_command() {
 
     let public_key_path = temp_root.path().join("pub.key");
     let private_key_path = temp_root.path().join("priv.key");
-    generate_keys_with_password(&public_key_path, &private_key_path);
+    generate_keys_with_passphrase(&public_key_path, &private_key_path);
 
     let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
@@ -103,7 +103,7 @@ fn test_encrypt_directory_via_tar_command() {
             "--decrypt", encrypted_path.to_str().unwrap(),
             "--output", decrypted_tar_path.to_str().unwrap(),
             "--private-key", private_key_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSWORD,
+            "--passphrase", TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to run pqenc decrypt");
@@ -152,7 +152,7 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
 
     let public_key_path = temp_root.path().join("pub.key");
     let private_key_path = temp_root.path().join("priv.key");
-    generate_keys_with_password(&public_key_path, &private_key_path);
+    generate_keys_with_passphrase(&public_key_path, &private_key_path);
 
     let encrypted_path = temp_root.path().join("archive.tar.gz.pqe");
     let pqenc_bin = std::env::var("CARGO_BIN_EXE_pqenc")
@@ -196,7 +196,7 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
             "--decrypt", encrypted_path.to_str().unwrap(),
             "--output", decrypted_tar_path.to_str().unwrap(),
             "--private-key", private_key_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSWORD,
+            "--passphrase", TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to run pqenc decrypt");
