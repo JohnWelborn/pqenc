@@ -881,9 +881,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     } else {
         println!("  Private key is passphrase-protected");
     }
-    println!("  Fingerprint: {}", format_fingerprint(&digest));
     println!();
-    println!("The key's randomart image is:");
+    println!("Key fingerprint is:");
+    println!("{}", format_fingerprint(&digest));
+    println!("Key's randomart image is:");
     println!("{}", randomart(&digest, "ML-KEM-1024", "SHA256"));
 
     Ok(())

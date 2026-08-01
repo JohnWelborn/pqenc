@@ -653,8 +653,8 @@ fn test_generate_keys_prints_fingerprint_and_randomart() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Fingerprint: SHA256:"), "stdout: {}", stdout);
-    assert!(stdout.contains("The key's randomart image is:"), "stdout: {}", stdout);
+    assert!(stdout.contains("Key fingerprint is:\nSHA256:"), "stdout: {}", stdout);
+    assert!(stdout.contains("Key's randomart image is:"), "stdout: {}", stdout);
     assert!(stdout.contains("+--[ML-KEM-1024]--+"), "stdout: {}", stdout);
     assert!(stdout.contains("+----[SHA256]-----+"), "stdout: {}", stdout);
 }
