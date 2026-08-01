@@ -782,6 +782,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     composite_priv.extend_from_slice(&(mlkem_sk_bytes.len() as u32).to_be_bytes());
     composite_priv.extend_from_slice(mlkem_sk_bytes);
     composite_priv.extend_from_slice(x25519_secret.to_bytes().as_ref());
+    // Wrapped immediately so every early-return below (passphrase prompt I/O
+    // errors, a passphrase mismatch, or an encrypt_private_key failure) still
+    // zeroizes this via ZeroizeOnDrop, not just the success path.
+    let mut composite_priv = SensitiveData::new(composite_priv);
 
     let display_priv_path = std::path::absolute(private_key_path)
         .map(|p| p.display().to_string())
@@ -815,10 +819,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     let pem_priv = if unencrypted {
         passphrase1.zeroize();
         passphrase2.zeroize();
-        pem_encode(&composite_priv, PEM_PRIV_BEGIN, PEM_PRIV_END)
+        pem_encode(&composite_priv.data, PEM_PRIV_BEGIN, PEM_PRIV_END)
     } else {
         let encrypted_priv = {
-            let result = encrypt_private_key(&composite_priv, passphrase1.as_bytes());
+            let result = encrypt_private_key(&composite_priv.data, passphrase1.as_bytes());
             passphrase1.zeroize();
             passphrase2.zeroize();
             result?
