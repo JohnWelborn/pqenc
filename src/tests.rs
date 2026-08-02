@@ -944,4 +944,55 @@
             assert!(result.is_ok(), "{:?}", result.err());
             assert_eq!(fs::read(&output_path).unwrap(), plaintext);
         }
+
+        #[test]
+        fn test_verify_open_file_leaves_handle_reusable_for_decrypt() {
+            // decrypt_file no longer verifies one handle and reopens the path
+            // for a second one -- it reuses the exact handle verify_open_file
+            // was given, seeking back to the start of the body (see
+            // verify_open_file's doc comment). This proves that reuse works:
+            // after verifying, the same handle can be seeked and read to
+            // recover exactly the body bytes decrypt_file's AEAD loop needs,
+            // with no second `File::open` on the path involved.
+            //
+            // The path is also deleted between opening and verifying: on
+            // Unix, an open file descriptor keeps referencing the original
+            // inode after unlink, so this only passes if verify_open_file
+            // truly operates on the handle it was given rather than
+            // (re)opening the path itself -- directly demonstrating decrypt's
+            // fix is bound to file identity, not to the path, closing the
+            // verify/decrypt race the fix addresses.
+            use sha2::Digest;
+            let dir = TempDir::new().unwrap();
+            let plaintext = vec![0x42u8; (2 * CHUNK_SIZE) + 999];
+            let (mut file_bytes, _priv_pem) = build_test_pqe_file_multichunk(
+                &[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])],
+                &[],
+                &plaintext,
+            );
+            let trailer: [u8; TRAILER_SIZE] = Sha256::digest(&file_bytes).into();
+            file_bytes.extend_from_slice(&trailer);
+
+            let input_path = dir.path().join("reuse.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+
+            let mut fin = File::open(&input_path).unwrap();
+            #[cfg(unix)]
+            fs::remove_file(&input_path).unwrap();
+
+            let verified = verify_open_file(&mut fin, input_path.to_str().unwrap())
+                .expect("verify should succeed against the already-open handle");
+
+            let header_end_pos = verified.parsed.header_bytes.len() as u64;
+            let body_len = (verified.body_end - header_end_pos) as usize;
+
+            fin.seek(SeekFrom::Start(header_end_pos))
+                .expect("the verified handle must still be seekable");
+            let mut body = vec![0u8; body_len];
+            fin.read_exact(&mut body)
+                .expect("body must be readable on the same handle after verification, with no reopen");
+
+            let expected_body = &file_bytes[header_end_pos as usize..verified.body_end as usize];
+            assert_eq!(body, expected_body, "reused handle must read back the exact verified body bytes");
+        }
     }

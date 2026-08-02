@@ -66,7 +66,7 @@ use libcrux_ml_kem::mlkem1024;
 use rand::Rng;
 use sha2::Sha256;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use base64::prelude::*;
 
@@ -1717,14 +1717,18 @@ fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result
 /// 1. If an explicit output path was given, claims it immediately
 ///    (fail-fast) -- before the checksum preflight below, so an occupied
 ///    destination is reported without first scanning the whole input file
-/// 2. Runs `verify_file` as a preflight -- structure and, if present, the
+/// 2. Opens the input file once and runs `verify_open_file` on that handle
+///    as a preflight -- header structure (magic bytes, KEM ciphertext,
+///    X25519 public key, salt, nonce, and, for PQE2, the cleartext
+///    extension and encrypted metadata regions) and, if present, the
 ///    checksum trailer -- before touching the private key at all, so
 ///    accidental corruption is reported clearly and cheaply rather than
 ///    partway through the slower chunk-by-chunk AEAD pass
-/// 3. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
-///    and, for PQE2, the cleartext extension and encrypted metadata regions)
-/// 4. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
+/// 3. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
 ///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
+/// 4. Rewinds the same file handle (no second `open` on the path -- see
+///    `verify_open_file`'s doc comment for why) to the start of the
+///    encrypted body
 /// 5. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
 /// 6. Performs X25519 key exchange with ephemeral public key
 /// 7. Combines secrets and derives the AES-256 key using HKDF-SHA256
@@ -1779,27 +1783,34 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     // before doing any key-dependent work -- catches accidental corruption
     // with a clear error before spending time on the private key (which may
     // mean an interactive passphrase prompt) or the chunk-by-chunk AEAD pass.
+    //
+    // Opens `fin` once here and reuses that exact handle for decryption
+    // below (rewound, not reopened) rather than verifying one handle and
+    // then reopening `input_path` for a second one -- reopening would leave
+    // a window between the check and the decrypt where the file at that
+    // path could be swapped out from under it (see verify_open_file's doc
+    // comment).
     println!("Running verify...");
-    verify_file(input_path).context("Verification failed; aborting decrypt")?;
+    let mut fin = File::open(input_path).context("Failed to open input file")?;
+    let verified = verify_open_file(&mut fin, input_path).context("Verification failed; aborting decrypt")?;
     println!("Verify passed. Decrypting...");
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
     let composite_priv = load_private_key(private_key_path, passphrase)?;
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 
-    let mut fin = File::open(input_path).context("Failed to open input file")?;
-
-    let parsed = parse_header(&mut fin)?;
+    let VerifiedFile { parsed, body_end } = verified;
     let header_end_pos = parsed.header_bytes.len() as u64;
     let ParsedHeader {
         is_v2, header_hash, prefix_hash, ciphertext_kem, ephemeral_x25519_pk,
-        salt, base_nonce, metadata_ciphertext, has_trailer, ..
+        salt, base_nonce, metadata_ciphertext, has_trailer: _, ..
     } = parsed;
 
-    // Validate file contains encrypted data beyond the header, accounting
-    // for the optional trailer (see body_end_len's doc comment).
-    let file_len = fin.metadata()?.len();
-    let body_end = body_end_len(file_len, header_end_pos, has_trailer)?;
+    // Rewind the verified handle back to the start of the encrypted body --
+    // verify_open_file left it past the trailer (or past the body, if
+    // there's no trailer) after hashing.
+    fin.seek(SeekFrom::Start(header_end_pos))
+        .context("Failed to rewind verified file handle")?;
 
     // ML-KEM decapsulation
     // Deserialize private key (3168 bytes for ML-KEM-1024)
@@ -1992,6 +2003,14 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     }
 }
 
+/// Result of `verify_open_file`: everything the caller needs to continue
+/// working with the file it just verified, without re-parsing the header or
+/// reopening the path.
+struct VerifiedFile {
+    parsed: ParsedHeader,
+    body_end: u64,
+}
+
 /// Checks a PQE1/PQE2 file's magic bytes and header structure, and, if the
 /// header's extension region marks a checksum trailer as present,
 /// recomputes a SHA-256 over the whole file (minus the trailer itself) and
@@ -2011,19 +2030,19 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
 /// PQE1 file) still gets the structural checks; the checksum comparison is
 /// simply skipped, and that's not itself a failure.
 ///
+/// Takes an already-open handle rather than a path, and leaves it
+/// positioned just past whatever it last read (past the trailer, or past
+/// the body if there's no trailer). `decrypt_file` relies on this: it opens
+/// `fin` once, verifies it here, and then seeks the very same handle back
+/// to the start of the body to decrypt -- rather than reopening the path a
+/// second time, which would leave a window between the check and the
+/// decrypt where the file at that path could be swapped out from under it.
+///
 /// # Returns
-/// * `Ok(())` if the file is structurally valid (and its checksum matches, when present)
+/// * `Ok(VerifiedFile)` if the file is structurally valid (and its checksum matches, when present)
 /// * `Err` otherwise -- callers (main) translate this into a non-zero exit code
-fn verify_file(input_path: &str) -> Result<()> {
-    validate_path(input_path, true, false, "Input file")?;
-    let input_meta = fs::metadata(input_path)
-        .context("Failed to read input file metadata")?;
-    if !input_meta.is_file() {
-        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
-    }
-
-    let mut fin = File::open(input_path).context("Failed to open input file")?;
-    let parsed = parse_header(&mut fin)?;
+fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
+    let parsed = parse_header(fin)?;
     let header_end_pos = parsed.header_bytes.len() as u64;
     let file_len = fin.metadata()?.len();
     let body_end = body_end_len(file_len, header_end_pos, parsed.has_trailer)?;
@@ -2033,7 +2052,7 @@ fn verify_file(input_path: &str) -> Result<()> {
     if !parsed.has_trailer {
         println!("No checksum trailer present (file predates this feature, or is PQE1); skipping checksum check.");
         println!("VALID (structure only): {}", input_path);
-        return Ok(());
+        return Ok(VerifiedFile { parsed, body_end });
     }
 
     use sha2::Digest;
@@ -2060,13 +2079,30 @@ fn verify_file(input_path: &str) -> Result<()> {
     if computed == trailer {
         println!("Checksum OK: matches embedded SHA-256 trailer");
         println!("VALID: {}", input_path);
-        Ok(())
+        Ok(VerifiedFile { parsed, body_end })
     } else {
         bail!(
             "CHECKSUM MISMATCH: file may be corrupted or truncated\n  computed: {}\n  trailer:  {}",
             to_hex(&computed), to_hex(&trailer)
         );
     }
+}
+
+/// Standalone `pqenc verify` entry point: validates `input_path`, opens it
+/// once, and runs `verify_open_file`. See that function for what's actually
+/// checked; this wrapper exists because the CLI command has no further use
+/// for the open handle or parsed header once verification is done.
+fn verify_file(input_path: &str) -> Result<()> {
+    validate_path(input_path, true, false, "Input file")?;
+    let input_meta = fs::metadata(input_path)
+        .context("Failed to read input file metadata")?;
+    if !input_meta.is_file() {
+        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+    }
+
+    let mut fin = File::open(input_path).context("Failed to open input file")?;
+    verify_open_file(&mut fin, input_path)?;
+    Ok(())
 }
 
 fn to_hex(bytes: &[u8]) -> String {
