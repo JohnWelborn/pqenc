@@ -42,6 +42,9 @@ argon2 = { version = "0.5", features = ["std"] }
 # For reading passphrases from terminal
 rpassword = "7.5"
 
+# Restoring original file modification/access times on decrypt
+filetime = "0.2"
+
 [dev-dependencies]
 # Property-based testing
 proptest = "1.11"

@@ -41,6 +41,42 @@ fn test_full_workflow_small_file() {
 }
 
 #[test]
+fn test_sha256_matches_before_encryption_and_after_decryption() {
+    use sha2::{Sha256, Digest};
+
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let input_data = TestData::random(50_000);
+    let input_path = env.create_file("payload.bin", &input_data.plaintext);
+    let encrypted_path = env.file_path("payload.bin.pqe");
+    let decrypted_path = env.file_path("payload_restored.bin");
+
+    let original_hash = Sha256::digest(&input_data.plaintext);
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE
+    ).unwrap();
+
+    let decrypted_hash = Sha256::digest(fs::read(&decrypted_path).unwrap());
+
+    assert_eq!(original_hash, decrypted_hash,
+               "SHA256 of the decrypted output must match SHA256 of the original input");
+}
+
+#[test]
 fn test_empty_file() {
     let env = TempTestEnv::new();
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
@@ -230,7 +266,89 @@ fn test_file_format_has_magic_bytes() {
     assert!(output.status.success());
 
     let encrypted = fs::read(&encrypted_path).unwrap();
-    assert_eq!(&encrypted[..4], b"PQE1");
+    assert_eq!(&encrypted[..4], b"PQE2");
+}
+
+#[test]
+fn test_optional_output_defaults_round_trip() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let input_path = env.create_file("notes.txt", b"optional output round trip");
+
+    // Encrypt without -o: should default to <input>.pqe
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let expected_encrypted_path = env.file_path("notes.txt.pqe");
+    assert!(expected_encrypted_path.exists(), "expected {:?} to exist", expected_encrypted_path);
+
+    // Remove the plaintext so decrypt has to genuinely restore it, rather
+    // than a coincidental leftover masking a bug.
+    fs::remove_file(&input_path).unwrap();
+
+    // Decrypt without -o: should restore the original filename, captured
+    // via Path::file_name() at encrypt time, next to the .pqe file.
+    let output = Command::new(pqenc_binary())
+        .args(&["decrypt",
+            "--decrypt", expected_encrypted_path.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap(),
+            "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Decryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    assert!(input_path.exists(), "expected restored file at {:?}", input_path);
+    assert_eq!(fs::read(&input_path).unwrap(), b"optional output round trip");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_decrypt_restores_original_mtime() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let input_path = env.create_file("timed.bin", b"timestamp restoration test");
+
+    // A deliberately distinctive mtime, far from "now" and from the file's
+    // creation time, so a coincidental match can't hide a bug.
+    let distinctive = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&input_path, distinctive).unwrap();
+
+    let encrypted_path = env.file_path("timed.bin.pqe");
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let decrypted_path = env.file_path("timed_restored.bin");
+    let output = Command::new(pqenc_binary())
+        .args(&["decrypt",
+            "--decrypt", encrypted_path.to_str().unwrap(),
+            "--output", decrypted_path.to_str().unwrap(),
+            "--private-key", priv_key.to_str().unwrap(),
+            "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Decryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let restored_meta = fs::metadata(&decrypted_path).unwrap();
+    let restored_mtime = filetime::FileTime::from_last_modification_time(&restored_meta);
+    assert_eq!(restored_mtime.unix_seconds(), distinctive.unix_seconds(),
+               "decrypted file's mtime should match the original input's mtime");
 }
 
 #[test]
@@ -437,7 +555,7 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
         assert_eq!(meta.len(), 0,
                    "Interrupted encryption left {} bytes of partial output at the destination",
                    meta.len());
-        assert_ne!(fs::read(&encrypted_path).unwrap().get(..4), Some(&b"PQE1"[..]),
+        assert_ne!(fs::read(&encrypted_path).unwrap().get(..4), Some(&b"PQE2"[..]),
                    "Interrupted encryption left a pqenc header at the destination");
     }
 
@@ -447,7 +565,7 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     assert!(!leftovers.is_empty(),
             "Expected an orphaned temp file after SIGKILL; encryption may not have started");
     let temp_bytes = fs::read(dir.join(&leftovers[0])).unwrap();
-    assert_eq!(temp_bytes.get(..4), Some(&b"PQE1"[..]),
+    assert_eq!(temp_bytes.get(..4), Some(&b"PQE2"[..]),
                "Temp file should hold the real output stream");
 }
 

@@ -7,6 +7,15 @@ fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
 }
 
+// Note: the test proving a malicious embedded filename (e.g. containing
+// "..") can't cause decrypt to write outside the intended directory lives
+// in src/tests.rs (tests::pqe2_format_tests::test_decrypt_rejects_traversal_in_embedded_filename),
+// not here. It requires constructing ciphertext with a hostile metadata
+// field value that the real `pqenc encrypt` binary can never produce (the
+// embedded filename always comes from `Path::file_name()`, which never
+// contains a path separator), so it can only be built from this crate's own
+// internals in a unit test, not driven black-box through the compiled binary.
+
 #[test]
 fn test_truncation_attack_detected() {
     let env = TempTestEnv::new();
@@ -106,6 +115,63 @@ fn test_encryption_is_nondeterministic() {
     let enc2 = fs::read(&enc2_path).unwrap();
 
     assert_ne!(enc1, enc2, "Encryption should be non-deterministic");
+}
+
+#[test]
+fn test_encrypted_file_does_not_contain_plaintext_content() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    // Long and distinctive enough that an accidental substring match in
+    // high-entropy ciphertext is not a realistic possibility.
+    let marker = b"THIS-IS-THE-PLAINTEXT-MARKER-0123456789-must-not-appear-in-ciphertext";
+    let input_path = env.create_file("payload.txt", marker);
+    let encrypted_path = env.file_path("payload.txt.pqe");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let encrypted = fs::read(&encrypted_path).unwrap();
+    assert!(
+        !encrypted.windows(marker.len()).any(|w| w == marker),
+        "encrypted output must not contain the plaintext content in the clear"
+    );
+}
+
+#[test]
+fn test_encrypted_file_does_not_contain_original_filename() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    // The embedded-filename metadata region is AEAD-encrypted; this proves
+    // it, rather than trusting that it was wired up correctly.
+    let distinctive_name = "super-secret-project-codename-fizzbuzz.txt";
+    let input_path = env.create_file(distinctive_name, b"unrelated content");
+    let encrypted_path = env.file_path("out.pqe");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    let encrypted = fs::read(&encrypted_path).unwrap();
+    let name_bytes = distinctive_name.as_bytes();
+    assert!(
+        !encrypted.windows(name_bytes.len()).any(|w| w == name_bytes),
+        "encrypted output must not contain the original filename in the clear"
+    );
 }
 
 #[test]

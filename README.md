@@ -28,13 +28,14 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
 - **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
 - **Key fingerprints & randomart** - `ssh-keygen`-style `SHA256:` fingerprints and ASCII-art visualization, shown at key generation and encryption time and available on demand via `pqenc fingerprint`, so a mismatched keypair can be caught by eye instead of only at restore time
+- **Metadata restoration** - the original filename, modification time, and access time are captured, encrypted, and authenticated at encrypt time, and restored automatically on decrypt when `--output` is omitted; restoration is best-effort and never fails the decrypt
 
 ## Quick Start
 
 ```bash
 pqenc generate-keys -p pub.key -s priv.key
-pqenc encrypt -p pub.key -i secret.txt -o secret.txt.pqe
-pqenc decrypt -s priv.key -i secret.txt.pqe -o secret.txt
+pqenc encrypt -p pub.key -i secret.txt        # produces secret.txt.pqe
+pqenc decrypt -s priv.key -i secret.txt.pqe   # restores secret.txt (name/timestamps from metadata)
 ```
 
 ## Typical Workflow
@@ -86,6 +87,11 @@ cmp test.txt test.out && echo "restore verified"
 
 Nothing in the file format ties an encrypted file to a particular key, so
 encrypting to the wrong public key succeeds and reports success every time.
+(The embedded original filename, used to default `--output` on decrypt, is
+authenticated against tampering in transit, but not against a dishonest
+sender — anyone holding your public key can embed any filename they like.
+`pqenc decrypt` sanitizes it before ever using it as a path, but don't treat
+the restored name as attacker-independent information.)
 This restore drill is the most thorough check, but not the only one:
 `pqenc encrypt` also prints the recipient key's fingerprint on every run, and
 `pqenc fingerprint --public-key pub.key` / `pqenc fingerprint --private-key
@@ -120,6 +126,11 @@ run is not blocked by a leftover stump.
 ```bash
 pqenc decrypt --private-key priv.key --decrypt backup.tar.gz.pqe --output backup.tar.gz
 ```
+
+`--output` can be omitted: decrypt then restores the original filename (and
+modification/access times) embedded in the encrypted file, falling back to
+stripping a trailing `.pqe` from the input path if no filename was embedded
+(e.g. an older `PQE1` file, or one encrypted from stdin).
 
 If preferred, decryption can be performed on an offline or air-gapped machine by transferring the encrypted file there.
 

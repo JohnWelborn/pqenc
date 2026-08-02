@@ -8,7 +8,8 @@
 //! # Security Features
 //! - ML-KEM-1024: Post-quantum secure key encapsulation mechanism
 //! - X25519: Ephemeral-static Diffie-Hellman mixed with the KEM secret
-//! - HKDF-SHA256: Derives the AES-256 key from ML-KEM secret || X25519 secret
+//! - HKDF-SHA256: Derives the AES-256 key from ML-KEM secret || X25519 secret,
+//!   and (domain-separated by info string) a second key for the metadata region
 //! - AES-256-GCM: Authenticated encryption with additional data
 //! - Context-binding AAD: Each chunk authenticated with chunk index and header hash
 //! - Zeroization: Automatic clearing of sensitive data from memory
@@ -16,14 +17,25 @@
 //!
 //! # File Format
 //! ```text
-//! [4 bytes: Magic "PQE1"]
+//! [4 bytes: Magic "PQE1" or "PQE2"]
 //! [4 bytes: KEM ciphertext length]
 //! [N bytes: KEM ciphertext]
 //! [32 bytes: ephemeral X25519 public key]
 //! [16 bytes: Salt for HKDF]
 //! [12 bytes: Base nonce]
+//! --- PQE2 only, below this line ---
+//! [4 bytes: cleartext extension region length]
+//! [E bytes: cleartext, header-hash-authenticated TLV fields (none defined yet;
+//!           forward-compatible: unknown field IDs are skipped by their own
+//!           length prefix, so a future field needs no further magic bump)]
+//! [4 bytes: encrypted metadata region length]
+//! [M bytes: AEAD-encrypted TLV (original filename, mtime, atime), under a
+//!           key domain-separated from the body key]
 //! [Encrypted chunks with 16-byte authentication tags]
 //! ```
+//! `pqenc decrypt` accepts both `PQE1` and `PQE2`; `pqenc encrypt` always
+//! writes `PQE2`. `PQE1` files simply lack the two regions above -- not
+//! present-but-empty, absent from the byte stream entirely.
 //!
 //! # Accepted Risks
 //! - AES-GCM integrity guarantees degrade beyond ~64 GiB per file due to birthday-bound
@@ -53,9 +65,38 @@ const SALT_SIZE: usize = 16;
 const CHUNK_SIZE: usize = 64 * 1024;
 const TAG_SIZE: usize = 16;
 const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
-const MAGIC: &[u8] = b"PQE1";
+const MAGIC_V1: &[u8] = b"PQE1";
+const MAGIC_V2: &[u8] = b"PQE2";
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
+
+// PQE2 header regions. Both length prefixes are attacker-controlled before
+// validation, so each region has a generous-but-bounded cap to prevent an
+// oversized length claim from driving a huge allocation on read — same role
+// as MAX_KEM_CIPHERTEXT_SIZE above.
+const MAX_EXTENSION_REGION_SIZE: usize = 65536;
+const MAX_METADATA_PLAINTEXT_SIZE: usize = 65536;
+const MAX_METADATA_CIPHERTEXT_SIZE: usize = MAX_METADATA_PLAINTEXT_SIZE + TAG_SIZE;
+
+// Domain-separates the metadata region's single AEAD call from body-chunk
+// AAD (which uses AAD_CHUNK_TYPE_NORMAL/_LAST) at the byte level, on top of
+// the key-level separation from METADATA_KEY_INFO below.
+const AAD_CHUNK_TYPE_METADATA: u8 = 0x02;
+
+// Metadata TLV field IDs (PQE2 encrypted region only). Unrecognized IDs are
+// skipped, not rejected -- see parse_tlv_fields -- so new fields can be added
+// later without another format-version bump.
+const METADATA_FIELD_FILENAME: u8 = 0x01;
+const METADATA_FIELD_MTIME: u8 = 0x02;
+const METADATA_FIELD_ATIME: u8 = 0x03;
+
+/// 8-byte BE i64 Unix seconds + 4-byte BE u32 nanoseconds -- matches
+/// filetime::FileTime's own (seconds, nanoseconds) representation exactly,
+/// so encode/decode need no unit conversion.
+const TIMESTAMP_FIELD_SIZE: usize = 12;
+
+const AES_KEY_INFO: &[u8] = b"pqenc-hybrid-aes-key";
+const METADATA_KEY_INFO: &[u8] = b"pqenc-hybrid-metadata-key";
 
 // File permission bits requested at creation, before umask. Not `#[cfg(unix)]`:
 // they are named at call sites that compile on every platform, and the helper
@@ -151,16 +192,16 @@ enum Commands {
     Encrypt {
         #[arg(long = "encrypt", short = 'i')]
         input: String,
-        #[arg(long, short = 'o')]
-        output: String,
+        #[arg(long, short = 'o', help = "Output file (default: <input>.pqe)")]
+        output: Option<String>,
         #[arg(long, short = 'p')]
         public_key: String,
     },
     Decrypt {
         #[arg(long = "decrypt", short = 'i', help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
         input: String,
-        #[arg(long, short = 'o')]
-        output: String,
+        #[arg(long, short = 'o', help = "Output file (default: derived from the original filename embedded in the encrypted file, or by stripping a trailing .pqe from the input path)")]
+        output: Option<String>,
         #[arg(long, short = 's')]
         private_key: String,
         #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
@@ -690,10 +731,11 @@ fn run() -> Result<()> {
             generate_keys(&public_key, &private_key, passphrase)?;
         }
         Commands::Encrypt { input, output, public_key } => {
+            let output = resolve_encrypt_output(&input, output)?;
             encrypt_file(&input, &output, &public_key)?;
         }
         Commands::Decrypt { input, output, private_key, passphrase } => {
-            decrypt_file(&input, &output, &private_key, passphrase)?;
+            decrypt_file(&input, output.as_deref(), &private_key, passphrase)?;
         }
         Commands::Fingerprint { key_source, passphrase } => {
             show_fingerprint(key_source.public_key, key_source.private_key, passphrase)?;
@@ -901,8 +943,8 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
 
 /// Derives an AES-256 key from a combined secret using HKDF-SHA256.
 ///
-/// Uses HKDF with the provided salt and info string "pqenc-hybrid-aes-key"
-/// to derive a 32-byte key suitable for AES-256-GCM.
+/// Uses HKDF with the provided salt and info string AES_KEY_INFO to derive
+/// a 32-byte key suitable for AES-256-GCM.
 /// The combined secret should be 64 bytes (32 from ML-KEM + 32 from X25519).
 fn derive_aes_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> {
     if combined_secret.len() != SHARED_SECRET_SIZE {
@@ -910,7 +952,25 @@ fn derive_aes_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> 
     }
     let hkdf = Hkdf::<Sha256>::new(Some(salt), combined_secret);
     let mut okm = vec![0u8; AES_KEY_SIZE];
-    hkdf.expand(b"pqenc-hybrid-aes-key", &mut okm)
+    hkdf.expand(AES_KEY_INFO, &mut okm)
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {}", e))?;
+    Ok(SensitiveData::new(okm))
+}
+
+/// Derives the PQE2 metadata region's AES-256 key from the same combined
+/// secret and salt as `derive_aes_key`, domain-separated by info string
+/// alone (METADATA_KEY_INFO vs AES_KEY_INFO). This independence is what
+/// makes it safe for the metadata region to reuse `base_nonce` directly as
+/// its AEAD nonce rather than deriving a fresh one: the two keys can never
+/// collide, and the metadata key is used for exactly one AEAD call per
+/// encryption run.
+fn derive_metadata_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> {
+    if combined_secret.len() != SHARED_SECRET_SIZE {
+        bail!("Combined secret must be {} bytes", SHARED_SECRET_SIZE);
+    }
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), combined_secret);
+    let mut okm = vec![0u8; AES_KEY_SIZE];
+    hkdf.expand(METADATA_KEY_INFO, &mut okm)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {}", e))?;
     Ok(SensitiveData::new(okm))
 }
@@ -963,15 +1023,245 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
     aad
 }
 
+/// Builds the AAD for the PQE2 metadata region's single AEAD call:
+/// `[AAD_CHUNK_TYPE_METADATA(1)] || prefix_hash(32)`. `prefix_hash` is the
+/// SHA256 of the header's fixed-position prefix (magic through base_nonce),
+/// computed before the metadata ciphertext exists -- unlike `header_hash`,
+/// which covers the *entire* header including the metadata ciphertext and
+/// so cannot be computed until after this AEAD call has already happened.
+/// Deliberately a different length (33 bytes) than `build_aad`'s 41, so the
+/// two AAD "channels" can never be confused even by byte length alone.
+fn build_metadata_aad(prefix_hash: &[u8; 32]) -> [u8; 33] {
+    let mut aad = [0u8; 33];
+    aad[0] = AAD_CHUNK_TYPE_METADATA;
+    aad[1..33].copy_from_slice(prefix_hash);
+    aad
+}
+
+/// Encodes `[field_id:1][len:4 BE][value:len]` entries back to back.
+/// Used for both the PQE2 cleartext extension region and the metadata
+/// region's plaintext (before AEAD encryption, in the latter case).
+fn encode_tlv_fields(fields: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (field_id, value) in fields {
+        out.push(*field_id);
+        out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// Parses a `[field_id:1][len:4 BE][value:len]`-encoded region into
+/// `(field_id, value)` pairs, without interpreting contents. Errors only on
+/// structural corruption (a length prefix that runs past the end of
+/// `region`) -- an unrecognized field ID is never an error here. Callers
+/// pick out the IDs they understand and ignore the rest, which is what
+/// makes both TLV regions forward-compatible with fields added later
+/// without another format-version bump.
+fn parse_tlv_fields(region: &[u8]) -> Result<Vec<(u8, &[u8])>> {
+    let mut fields = Vec::new();
+    let mut pos = 0;
+    while pos < region.len() {
+        if pos + 5 > region.len() {
+            bail!("Truncated TLV field header");
+        }
+        let field_id = region[pos];
+        let len = u32::from_be_bytes(region[pos + 1..pos + 5].try_into().unwrap()) as usize;
+        pos += 5;
+        if pos + len > region.len() {
+            bail!("Truncated TLV field value");
+        }
+        fields.push((field_id, &region[pos..pos + len]));
+        pos += len;
+    }
+    Ok(fields)
+}
+
+fn encode_timestamp(t: filetime::FileTime) -> [u8; TIMESTAMP_FIELD_SIZE] {
+    let mut bytes = [0u8; TIMESTAMP_FIELD_SIZE];
+    bytes[0..8].copy_from_slice(&t.unix_seconds().to_be_bytes());
+    bytes[8..12].copy_from_slice(&t.nanoseconds().to_be_bytes());
+    bytes
+}
+
+fn decode_timestamp(bytes: &[u8]) -> Result<filetime::FileTime> {
+    if bytes.len() != TIMESTAMP_FIELD_SIZE {
+        bail!("Invalid timestamp field length: {}", bytes.len());
+    }
+    let secs = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
+    let nanos = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+    Ok(filetime::FileTime::from_unix_time(secs, nanos))
+}
+
+/// Original-file metadata captured at encrypt time, embedded (encrypted) in
+/// the PQE2 metadata region. `None` for stdin input -- there's no real
+/// filename or timestamps to capture from a stream.
+struct SourceMetadata {
+    filename: Option<String>,
+    mtime: filetime::FileTime,
+    atime: filetime::FileTime,
+}
+
+/// Builds the metadata region's AEAD *plaintext*. `None` input produces an
+/// empty (0-field) plaintext -- the region is always present and always
+/// AEAD-encrypted, even when there's nothing to say, so header parsing
+/// never needs a separate "is metadata present" flag.
+fn encode_metadata_plaintext(source: Option<&SourceMetadata>) -> Vec<u8> {
+    let Some(s) = source else { return Vec::new(); };
+    let mtime_bytes = encode_timestamp(s.mtime);
+    let atime_bytes = encode_timestamp(s.atime);
+    let mut fields: Vec<(u8, &[u8])> = Vec::new();
+    if let Some(name) = &s.filename {
+        fields.push((METADATA_FIELD_FILENAME, name.as_bytes()));
+    }
+    fields.push((METADATA_FIELD_MTIME, &mtime_bytes));
+    fields.push((METADATA_FIELD_ATIME, &atime_bytes));
+    encode_tlv_fields(&fields)
+}
+
+/// Parsed PQE2 metadata region. `filename` is the RAW, unsanitized,
+/// potentially attacker-influenced string as embedded by whoever encrypted
+/// the file -- callers MUST run it through `sanitize_embedded_filename`
+/// before ever using it as a path component.
+struct DecodedMetadata {
+    filename: Option<String>,
+    mtime: Option<filetime::FileTime>,
+    atime: Option<filetime::FileTime>,
+}
+
+/// Parses already-AEAD-decrypted metadata plaintext. Silently skips any
+/// field ID this version doesn't recognize (forward compatibility, see
+/// `parse_tlv_fields`). A recognized field with a malformed value (wrong
+/// length) is a structural error, not silently skipped.
+fn decode_metadata_plaintext(plaintext: &[u8]) -> Result<DecodedMetadata> {
+    let mut filename = None;
+    let mut mtime = None;
+    let mut atime = None;
+    for (field_id, value) in parse_tlv_fields(plaintext)? {
+        match field_id {
+            METADATA_FIELD_FILENAME => {
+                filename = Some(String::from_utf8_lossy(value).into_owned());
+            }
+            METADATA_FIELD_MTIME => {
+                mtime = Some(decode_timestamp(value)?);
+            }
+            METADATA_FIELD_ATIME => {
+                atime = Some(decode_timestamp(value)?);
+            }
+            _ => {} // unknown field, forward-compatible: ignore
+        }
+    }
+    Ok(DecodedMetadata { filename, mtime, atime })
+}
+
+/// Validates a filename embedded in decrypted metadata as a single safe
+/// path component, or returns `None` to reject it.
+///
+/// SECURITY-CRITICAL: the embedded filename is attacker-influenced --
+/// anyone holding the recipient's public key can encrypt a file naming any
+/// string as the "original filename". AEAD authentication proves the
+/// metadata wasn't tampered with in transit, NOT that the sender was
+/// honest about the name. Whatever this returns, if `Some`, is safe to
+/// `Path::join` onto a trusted target directory and can only ever resolve
+/// to a direct child of that directory -- never elsewhere. Callers must
+/// never use the raw, unsanitized string for anything path-related.
+fn sanitize_embedded_filename(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw == "." || raw == ".." {
+        return None;
+    }
+    // '/' and '\\' are path separators (the latter rejected on principle,
+    // even though this project is Unix-focused): Path::join does not treat
+    // an embedded separator as opaque, so leaving one in would let the
+    // embedded name introduce subdirectories or, combined with "..",
+    // escape the target directory entirely. '\0' is rejected because some
+    // OS/FFI layers truncate at NUL, which could silently drop a suffix a
+    // human reviewing the name would have seen.
+    if raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+/// Resolves the encrypt output path when `-o` was omitted: `<input>.pqe`.
+/// Bails if input is stdin -- there's no filename to derive a default from.
+fn resolve_encrypt_output(input_path: &str, output: Option<String>) -> Result<String> {
+    match output {
+        Some(o) => Ok(o),
+        None => {
+            if is_stdin_path(input_path) {
+                bail!("--output is required when reading from stdin");
+            }
+            Ok(format!("{}.pqe", input_path))
+        }
+    }
+}
+
+/// Resolves the decrypt output path when `-o` was omitted, in precedence
+/// order:
+///   (a) a sanitized embedded filename, placed as a sibling of `input_path`
+///       (its parent directory, not the current working directory -- this
+///       keeps behavior consistent with (b)'s directory-preserving
+///       heuristic below);
+///   (b) `input_path` with a trailing ".pqe" stripped (directory-preserving);
+///   (c) an error asking for an explicit `--output`.
+///
+/// `embedded_filename` is the RAW metadata field value (or `None` for a
+/// PQE1 input, a stdin-sourced PQE2 encryption, or a PQE2 file whose
+/// metadata omitted the field) -- sanitized internally, never used verbatim.
+/// If sanitization rejects it, this falls through to (b) rather than
+/// failing outright, since the field is attacker-influenced and shouldn't
+/// be able to force a hard failure a plain `.pqe`-suffixed name would have
+/// avoided.
+fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> Result<String> {
+    if let Some(raw) = embedded_filename {
+        if let Some(safe_name) = sanitize_embedded_filename(raw) {
+            let parent = std::path::Path::new(input_path)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            return Ok(parent.join(safe_name).to_string_lossy().into_owned());
+        }
+    }
+    if let Some(stripped) = input_path.strip_suffix(".pqe") {
+        return Ok(stripped.to_string());
+    }
+    bail!("--output is required: input does not end in .pqe and no filename was embedded in the encrypted file")
+}
+
+/// Claims `output_path` exclusively (O_CREAT|O_EXCL) and prepares a sibling
+/// temp-file path, returning both guards armed. Does not create the temp
+/// file itself -- callers do that separately, since they may need to do
+/// more work first. Shared by `encrypt_file`'s one claim site and
+/// `decrypt_file`'s two (an explicit `-o` claims immediately; an omitted
+/// `-o` claims after the metadata-derived default is known), so the
+/// guard-declaration-order contract (the fix for bug 7fc6654) can't drift
+/// between call sites.
+fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(TempFileGuard, TempFileGuard)> {
+    use rand::RngExt;
+
+    create_new_exclusive(output_path, OWNER_ONLY_MODE)
+        .context(claim_context.to_string())?;
+    let output_guard = TempFileGuard::new(output_path.to_string());
+
+    let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
+    let temp_guard = TempFileGuard::new(temp_path);
+
+    Ok((output_guard, temp_guard))
+}
+
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM.
 ///
 /// Performs hybrid post-quantum encryption:
 /// 1. Encapsulates a shared secret using the recipient's ML-KEM-1024 public key
 /// 2. Performs X25519 key exchange with ephemeral key
-/// 3. Combines both secrets and derives an AES-256 key using HKDF-SHA256
-/// 4. Encrypts the file in 64KB chunks using AES-256-GCM with unique nonces
-/// 5. Writes encrypted output with header containing KEM ciphertext, X25519 public key, salt, and base nonce
-/// 6. Streams into a sibling temp file and renames it into place, so a failed
+/// 3. Combines both secrets and derives an AES-256 key and a domain-separated
+///    metadata key using HKDF-SHA256
+/// 4. Captures the input file's basename, mtime, and atime (skipped for stdin)
+///    and encrypts them into the header's metadata region
+/// 5. Encrypts the file in 64KB chunks using AES-256-GCM with unique nonces
+/// 6. Writes encrypted output with header containing KEM ciphertext, X25519 public
+///    key, salt, base nonce, and the PQE2 extension/metadata regions
+/// 7. Streams into a sibling temp file and renames it into place, so a failed
 ///    run never leaves a partial output that looks like a completed backup
 ///
 /// # Arguments
@@ -984,7 +1274,6 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
 /// * `Err` if validation fails, encryption fails, or I/O errors occur
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, EphemeralSecret};
-    use rand::RngExt;
 
     let is_stdin = is_stdin_path(input_path);
 
@@ -1051,6 +1340,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     rand::rng().fill_bytes(&mut base_nonce);
 
     let aes_key = derive_aes_key(&combined_secret, &salt)?;
+    let metadata_key = derive_metadata_key(&combined_secret, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
@@ -1058,40 +1348,72 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     combined_secret.zeroize();
 
     let mut fin = open_input(input_path)?;
-    let input_size = if is_stdin {
-        None
+    let (input_size, source_metadata) = if is_stdin {
+        (None, None)
     } else {
-        Some(File::open(input_path)?.metadata()?.len())
+        let meta = File::open(input_path)?.metadata()?;
+        let filename = std::path::Path::new(input_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let mtime = filetime::FileTime::from_last_modification_time(&meta);
+        let atime = filetime::FileTime::from_last_access_time(&meta);
+        (Some(meta.len()), Some(SourceMetadata { filename, mtime, atime }))
     };
 
     // Claim the output path atomically. O_CREAT|O_EXCL both enforces the
     // "already exists" rejection and prevents TOCTOU/symlink attacks, and it
-    // reserves the name for the duration of the run.
-    create_new_exclusive(output_path, OWNER_ONLY_MODE)
-        .context("Failed to create output file (already exists or permission denied)")?;
-    let mut output_guard = TempFileGuard::new(output_path.to_string());
-
-    // Stream ciphertext into a sibling temp file and rename over the placeholder
-    // on success, so a failure mid-write can never leave a partial .enc at
-    // output_path. Guard declaration order is the cleanup contract: dropping in
-    // reverse closes fout, unlinks the temp, then unlinks the placeholder.
-    let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
-    let mut temp_guard = TempFileGuard::new(temp_path);
+    // reserves the name for the duration of the run. Streams ciphertext into
+    // a sibling temp file and renames over the placeholder on success, so a
+    // failure mid-write can never leave a partial .enc at output_path. Guard
+    // declaration order is the cleanup contract: dropping in reverse closes
+    // fout, unlinks the temp, then unlinks the placeholder.
+    let (mut output_guard, mut temp_guard) = claim_output_and_temp(
+        output_path,
+        "Failed to create output file (already exists or permission denied)",
+    )?;
     let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
 
     // Build header and compute hash for AAD
     let kem_ct_len = ciphertext.as_slice().len() as u32;
     let mut header = Vec::new();
-    header.extend_from_slice(MAGIC);
+    header.extend_from_slice(MAGIC_V2);
     header.extend_from_slice(&kem_ct_len.to_be_bytes());
     header.extend_from_slice(ciphertext.as_slice());
     header.extend_from_slice(ephemeral_public.as_bytes());
     header.extend_from_slice(&salt);
     header.extend_from_slice(&base_nonce);
 
-    // Compute header hash for AAD binding
     use sha2::Digest;
+
+    // prefix_hash binds the metadata region's AEAD call to the fixed header
+    // fields above, computed now because the metadata ciphertext doesn't
+    // exist yet -- header_hash (below) covers the whole header including
+    // the metadata region, so it can't be computed until after this point.
+    let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
+
+    // Cleartext extension region: unused (0 fields) today, but structurally
+    // present so a future field (e.g. a header-embedded recipient
+    // fingerprint) can be added without another magic-byte bump.
+    let extension_region = encode_tlv_fields(&[]);
+    header.extend_from_slice(&(extension_region.len() as u32).to_be_bytes());
+    header.extend_from_slice(&extension_region);
+
+    // Encrypted metadata region: original filename + mtime/atime, under a
+    // key domain-separated from the body key (see derive_metadata_key).
+    let mut metadata_plaintext = encode_metadata_plaintext(source_metadata.as_ref());
+    let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+    let metadata_aad = build_metadata_aad(&prefix_hash);
+    let metadata_ciphertext = metadata_cipher.encrypt(
+        Nonce::from_slice(&base_nonce),
+        Payload { msg: metadata_plaintext.as_slice(), aad: &metadata_aad },
+    ).map_err(|e| anyhow::anyhow!("Metadata encryption failed: {}", e))?;
+    metadata_plaintext.zeroize();
+    header.extend_from_slice(&(metadata_ciphertext.len() as u32).to_be_bytes());
+    header.extend_from_slice(&metadata_ciphertext);
+
+    // Compute header hash for AAD binding (covers the whole header, including
+    // the two regions above)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     // Write header to file
@@ -1191,31 +1513,35 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 /// Decrypts a file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
 ///
 /// Performs hybrid post-quantum decryption:
-/// 1. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce)
+/// 1. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
+///    and, for PQE2, the cleartext extension and encrypted metadata regions)
 /// 2. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
 ///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
 /// 3. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
 /// 4. Performs X25519 key exchange with ephemeral public key
 /// 5. Combines secrets and derives the AES-256 key using HKDF-SHA256
-/// 6. Decrypts chunks using AES-256-GCM, verifying authentication tags
-/// 7. Deletes partial output and returns error if integrity check fails
+/// 6. For PQE2, decrypts and parses the metadata region (original filename, mtime, atime)
+/// 7. Resolves the output path -- the given `output_path`, or, if omitted, a
+///    sanitized embedded filename, or a `.pqe`-stripped fallback
+/// 8. Decrypts chunks using AES-256-GCM, verifying authentication tags
+/// 9. Deletes partial output and returns error if integrity check fails
+/// 10. Best-effort restores mtime/atime from the metadata region, if present
 ///
 /// # Arguments
 /// * `input_path` - Path to encrypted file
-/// * `output_path` - Path where decrypted file will be written
+/// * `output_path` - Path where decrypted file will be written, or `None` to derive
+///   one from embedded metadata or the input filename (see `resolve_decrypt_output`)
 /// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
 /// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
 ///
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
-fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
+fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-    use rand::RngExt;
 
     // Validate all paths (stdin not supported for decryption - requires seekable input)
     validate_path(input_path, true, false, "Input file")?;
-    validate_path(output_path, false, false, "Output file")?;
     validate_path(private_key_path, true, false, "Private key")?;
     let input_meta = fs::metadata(input_path)
         .context("Failed to read input file metadata")?;
@@ -1223,16 +1549,20 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
         bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
     }
 
-    // Atomically claim the output path before any decryption work begins.
-    // Using create_new(true) anchors on a file descriptor rather than checking
-    // existence separately, eliminating the check-then-rename TOCTOU window.
-    create_new_exclusive(output_path, OWNER_ONLY_MODE)
-        .context("Output file already exists or cannot be created")?;
-    let mut output_guard = TempFileGuard::new(output_path.to_string());
-
-    // Generate temporary file path for atomic write
-    let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
-    let mut temp_guard = TempFileGuard::new(temp_path);
+    // If -o was given, claim it immediately (fail-fast, matches prior
+    // behavior: using create_new(true) anchors on a file descriptor rather
+    // than checking existence separately, eliminating the check-then-rename
+    // TOCTOU window). If omitted, claiming is deferred until the
+    // metadata-derived default is known (see below), since that requires
+    // decrypting the metadata region, which requires the private key.
+    let early_claim: Option<(String, TempFileGuard, TempFileGuard)> = match output_path {
+        Some(o) => {
+            validate_path(o, false, false, "Output file")?;
+            let (og, tg) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
+            Some((o.to_string(), og, tg))
+        }
+        None => None,
+    };
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
     let composite_priv = load_private_key(private_key_path, passphrase)?;
@@ -1243,9 +1573,13 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     // Read and parse header
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
-    if magic != MAGIC {
+    let is_v2 = if magic == MAGIC_V1 {
+        false
+    } else if magic == MAGIC_V2 {
+        true
+    } else {
         bail!("Invalid file format or version");
-    }
+    };
 
     let mut len_bytes = [0u8; 4];
     fin.read_exact(&mut len_bytes)?;
@@ -1276,8 +1610,44 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     header.extend_from_slice(&salt);
     header.extend_from_slice(&base_nonce);
 
-    // Compute header hash for AAD binding
     use sha2::Digest;
+
+    // prefix_hash is the AAD for the metadata region's AEAD call (see
+    // build_metadata_aad); computed here, before the metadata region (if
+    // any) is read, exactly mirroring how encrypt_file computes it.
+    let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
+
+    let mut metadata_ciphertext: Vec<u8> = Vec::new();
+    if is_v2 {
+        let mut ext_len_bytes = [0u8; 4];
+        fin.read_exact(&mut ext_len_bytes)?;
+        let ext_len = u32::from_be_bytes(ext_len_bytes) as usize;
+        if ext_len > MAX_EXTENSION_REGION_SIZE {
+            bail!("Invalid extension region length: {}", ext_len);
+        }
+        let mut extension_region = vec![0u8; ext_len];
+        fin.read_exact(&mut extension_region)?;
+        // Structural validation only -- no fields are defined yet, and an
+        // unrecognized one (from a future encoder) would not be an error.
+        parse_tlv_fields(&extension_region)?;
+
+        let mut meta_len_bytes = [0u8; 4];
+        fin.read_exact(&mut meta_len_bytes)?;
+        let meta_len = u32::from_be_bytes(meta_len_bytes) as usize;
+        if !(TAG_SIZE..=MAX_METADATA_CIPHERTEXT_SIZE).contains(&meta_len) {
+            bail!("Invalid metadata region length: {}", meta_len);
+        }
+        metadata_ciphertext = vec![0u8; meta_len];
+        fin.read_exact(&mut metadata_ciphertext)?;
+
+        header.extend_from_slice(&ext_len_bytes);
+        header.extend_from_slice(&extension_region);
+        header.extend_from_slice(&meta_len_bytes);
+        header.extend_from_slice(&metadata_ciphertext);
+    }
+
+    // Compute header hash for AAD binding (covers the whole header,
+    // including the two PQE2 regions above when present)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     // Validate file contains encrypted data beyond the header
@@ -1332,8 +1702,43 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     let key = Key::<Aes256Gcm>::from_slice(&aes_key.data);
     let cipher = Aes256Gcm::new(key);
 
+    // Decrypt and parse the metadata region, if present. Doing this before
+    // zeroizing combined_secret (needed to derive metadata_key) also means a
+    // wrong recipient key is detected here, before any body-chunk work
+    // begins, for PQE2 files.
+    let decoded_metadata: Option<DecodedMetadata> = if is_v2 {
+        let metadata_key = derive_metadata_key(&combined_secret, &salt)?;
+        let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+        let metadata_aad = build_metadata_aad(&prefix_hash);
+        let mut metadata_plaintext = metadata_cipher.decrypt(
+            Nonce::from_slice(&base_nonce),
+            Payload { msg: metadata_ciphertext.as_slice(), aad: &metadata_aad },
+        ).map_err(|e| anyhow::anyhow!(
+            "Metadata decryption failed (Integrity check failed): {:?}\n\
+            Possible causes: Wrong key, corrupted file, or truncation attack.", e
+        ))?;
+        let decoded = decode_metadata_plaintext(&metadata_plaintext)?;
+        metadata_plaintext.zeroize();
+        Some(decoded)
+    } else {
+        None
+    };
+
     // Zeroize combined secret
     combined_secret.zeroize();
+
+    // Resolve the final output path and claim it, now that a metadata-driven
+    // default (if needed) is known. An explicit -o was already claimed above.
+    let (final_output_path, mut output_guard, mut temp_guard) = match early_claim {
+        Some((path, og, tg)) => (path, og, tg),
+        None => {
+            let embedded = decoded_metadata.as_ref().and_then(|m| m.filename.as_deref());
+            let resolved = resolve_decrypt_output(input_path, embedded)?;
+            validate_path(&resolved, false, false, "Output file")?;
+            let (og, tg) = claim_output_and_temp(&resolved, "Output file already exists or cannot be created")?;
+            (resolved, og, tg)
+        }
+    };
 
     // Create temporary output file with restrictive permissions (0o600 on Unix)
     let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
@@ -1403,13 +1808,32 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     match decrypt_result {
         Ok(_) => {
             let temp_path = temp_guard.path().to_string();
-            fs::rename(&temp_path, output_path)
+            fs::rename(&temp_path, &final_output_path)
                 .context("Failed to move decrypted file to final destination")?;
             temp_guard.disarm();
             output_guard.disarm();
-            sync_parent_dir(output_path)
+            sync_parent_dir(&final_output_path)
                 .context("Failed to sync directory after rename; decrypted output may not survive a crash")?;
-            println!("File decrypted successfully: {}", output_path);
+
+            // Best-effort: restore the original file's mtime/atime if the
+            // metadata region carried them. Runs after both disarms (same
+            // precedent as sync_parent_dir above) so it can never reintroduce
+            // the "nothing fallible between rename and disarm" hazard.
+            // Content correctness matters far more than timestamps, so a
+            // failure here is a warning, not a decrypt failure.
+            if let Some(meta) = &decoded_metadata {
+                let restore_result = match (meta.mtime, meta.atime) {
+                    (Some(mtime), Some(atime)) => filetime::set_file_times(&final_output_path, atime, mtime),
+                    (Some(mtime), None) => filetime::set_file_mtime(&final_output_path, mtime),
+                    (None, Some(atime)) => filetime::set_file_atime(&final_output_path, atime),
+                    (None, None) => Ok(()),
+                };
+                if let Err(e) = restore_result {
+                    eprintln!("Warning: failed to restore original file timestamps: {}", e);
+                }
+            }
+
+            println!("File decrypted successfully: {}", final_output_path);
             Ok(())
         }
         Err(e) => Err(e),
