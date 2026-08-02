@@ -996,3 +996,65 @@
             assert_eq!(body, expected_body, "reused handle must read back the exact verified body bytes");
         }
     }
+
+    // Regression tests for TODO.md #1: claim_output_and_temp must not arm a
+    // TempFileGuard on the temp path until create_new_exclusive on that exact
+    // path has succeeded -- arming it earlier lets TempFileGuard::Drop delete
+    // a file this process never created if that random path happens to
+    // collide with something already there (attacker-planted or otherwise).
+    mod claim_output_and_temp_tests {
+        use super::*;
+        use tempfile::TempDir;
+
+        #[test]
+        fn test_claim_output_and_temp_does_not_create_temp_file() {
+            let dir = TempDir::new().unwrap();
+            let output_path = dir.path().join("output.enc");
+
+            let (output_guard, temp_path) = claim_output_and_temp(
+                output_path.to_str().unwrap(),
+                "test claim context",
+            ).unwrap();
+
+            assert!(!std::path::Path::new(&temp_path).exists(),
+                "claim_output_and_temp must not create the temp file itself");
+            assert!(output_path.exists(), "output path must be claimed immediately");
+            drop(output_guard);
+        }
+
+        #[test]
+        fn test_claim_output_and_temp_temp_collision_leaves_sentinel_unchanged() {
+            // Simulates an attacker (or unrelated process) planting a file at
+            // the exact random temp path claim_output_and_temp generated,
+            // before this process gets to claim it.
+            let dir = TempDir::new().unwrap();
+            let output_path = dir.path().join("output.enc");
+
+            let (output_guard, temp_path) = claim_output_and_temp(
+                output_path.to_str().unwrap(),
+                "test claim context",
+            ).unwrap();
+
+            const SENTINEL: &[u8] = b"pre-existing file that this process does not own";
+            fs::write(&temp_path, SENTINEL).unwrap();
+
+            // Mirror exactly what every real caller does immediately after
+            // claim_output_and_temp.
+            let create_result = create_new_exclusive(&temp_path, OWNER_ONLY_MODE);
+            assert!(create_result.is_err(), "create_new_exclusive must fail: the path is already occupied");
+            assert_eq!(create_result.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+
+            // The fix: temp_path is a plain String here, not an armed guard,
+            // so nothing gets dropped/unlinked as a result of the failed
+            // create above. create_new never truncates, so the sentinel's
+            // original bytes must survive intact.
+            assert_eq!(fs::read(&temp_path).unwrap(), SENTINEL,
+                "pre-existing file at the colliding temp path must not be modified or deleted");
+
+            // output_guard's own claim is a separate, correctly-owned file --
+            // confirm the fix didn't disturb it.
+            assert!(output_path.exists());
+            drop(output_guard);
+            assert!(!output_path.exists(), "output_guard still cleans up its own file normally");
+        }
+    }

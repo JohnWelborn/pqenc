@@ -1261,14 +1261,20 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
 }
 
 /// Claims `output_path` exclusively (O_CREAT|O_EXCL) and prepares a sibling
-/// temp-file path, returning both guards armed. Does not create the temp
-/// file itself -- callers do that separately, since they may need to do
-/// more work first. Shared by `encrypt_file`'s one claim site and
+/// temp-file path, returning the output guard armed and the temp path as a
+/// plain, unclaimed `String`. Does not create the temp file itself -- callers
+/// do that separately (since they may need to do more work first) and must
+/// only construct the temp file's own `TempFileGuard` AFTER their
+/// `create_new_exclusive` on it succeeds. Arming a guard on the temp path
+/// before it's claimed would let an EEXIST collision (this exact random name
+/// already occupied, e.g. by an attacker) drop the guard and delete a file
+/// this process never created -- the same hazard `write_new_file_synced`
+/// documents and avoids. Shared by `encrypt_file`'s one claim site and
 /// `decrypt_file`'s two (an explicit `-o` claims immediately; an omitted
 /// `-o` claims after the metadata-derived default is known), so the
 /// guard-declaration-order contract (the fix for bug 7fc6654) can't drift
 /// between call sites.
-fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(TempFileGuard, TempFileGuard)> {
+fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(TempFileGuard, String)> {
     use rand::RngExt;
 
     create_new_exclusive(output_path, OWNER_ONLY_MODE)
@@ -1276,9 +1282,8 @@ fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(Temp
     let output_guard = TempFileGuard::new(output_path.to_string());
 
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
-    let temp_guard = TempFileGuard::new(temp_path);
 
-    Ok((output_guard, temp_guard))
+    Ok((output_guard, temp_path))
 }
 
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM.
@@ -1399,12 +1404,21 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // failure mid-write can never leave a partial .enc at output_path. Guard
     // declaration order is the cleanup contract: dropping in reverse closes
     // fout, unlinks the temp, then unlinks the placeholder.
-    let (mut output_guard, mut temp_guard) = claim_output_and_temp(
+    //
+    // temp_guard is declared here (before fout) but only assigned below,
+    // after create_new_exclusive on the temp path succeeds -- arming it any
+    // earlier would let an EEXIST collision on that path drop the guard and
+    // delete a file this process doesn't own (see claim_output_and_temp).
+    // Declaring it here rather than after fout keeps the drop order above
+    // intact: fout must close before temp_guard tries to unlink it.
+    let (mut output_guard, temp_path) = claim_output_and_temp(
         output_path,
         "Failed to create output file (already exists or permission denied)",
     )?;
-    let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
+    let mut temp_guard: TempFileGuard;
+    let mut fout = create_new_exclusive(&temp_path, OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
+    temp_guard = TempFileGuard::new(temp_path);
 
     // Build header and compute hash for AAD
     let kem_ct_len = ciphertext.as_slice().len() as u32;
@@ -1770,11 +1784,11 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     // default is known (see below), since that requires decrypting the
     // metadata region, which requires the private key -- so for that case
     // the preflight still runs first regardless.
-    let early_claim: Option<(String, TempFileGuard, TempFileGuard)> = match output_path {
+    let early_claim: Option<(String, TempFileGuard, String)> = match output_path {
         Some(o) => {
             validate_path(o, false, false, "Output file")?;
-            let (og, tg) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
-            Some((o.to_string(), og, tg))
+            let (og, temp_path) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
+            Some((o.to_string(), og, temp_path))
         }
         None => None,
     };
@@ -1884,20 +1898,26 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
 
     // Resolve the final output path and claim it, now that a metadata-driven
     // default (if needed) is known. An explicit -o was already claimed above.
-    let (final_output_path, mut output_guard, mut temp_guard) = match early_claim {
-        Some((path, og, tg)) => (path, og, tg),
+    let (final_output_path, mut output_guard, temp_path) = match early_claim {
+        Some((path, og, temp_path)) => (path, og, temp_path),
         None => {
             let embedded = decoded_metadata.as_ref().and_then(|m| m.filename.as_deref());
             let resolved = resolve_decrypt_output(input_path, embedded)?;
             validate_path(&resolved, false, false, "Output file")?;
-            let (og, tg) = claim_output_and_temp(&resolved, "Output file already exists or cannot be created")?;
-            (resolved, og, tg)
+            let (og, temp_path) = claim_output_and_temp(&resolved, "Output file already exists or cannot be created")?;
+            (resolved, og, temp_path)
         }
     };
 
-    // Create temporary output file with restrictive permissions (0o600 on Unix)
-    let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
+    // Create temporary output file with restrictive permissions (0o600 on Unix).
+    // temp_guard is armed only now, after the exclusive create succeeds --
+    // see claim_output_and_temp's doc comment. fout is explicitly dropped
+    // before any later fallible return (below), so unlike encrypt_file's
+    // matching claim site, declaration order relative to fout doesn't matter
+    // here and no deferred-initialization dance is needed.
+    let mut fout = create_new_exclusive(&temp_path, OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
+    let mut temp_guard = TempFileGuard::new(temp_path);
 
     // Perform decryption - any error will trigger cleanup of temp file
     let decrypt_result = (|| -> Result<()> {
