@@ -831,11 +831,11 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     };
 
     // Zeroize sensitive data. MlKemPrivateKey has no Drop/ZeroizeOnDrop — an
-    // upstream gap in libcrux-ml-kem 0.0.9 (confirmed: no Zeroize impl behind
-    // any feature) — so the real backing bytes are wiped in place via its
-    // IndexMut impl. Not followed by `drop(mlkem_secret)`: that type still
-    // has no Drop, so an explicit drop would just be clippy::drop_non_drop
-    // again.
+    // upstream gap still present as of libcrux-ml-kem 0.0.10 (confirmed: no
+    // Zeroize impl behind any feature) — so the real backing bytes are wiped
+    // in place via its IndexMut impl. Not followed by `drop(mlkem_secret)`:
+    // that type still has no Drop, so an explicit drop would just be
+    // clippy::drop_non_drop again.
     mlkem_secret[0..MLKEM1024_PRIVATE_KEY_SIZE].zeroize();
     drop(x25519_secret);
     composite_priv.zeroize();

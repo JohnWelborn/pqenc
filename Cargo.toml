@@ -9,7 +9,7 @@ rust-version = "1.95"
 
 [dependencies]
 # ML-KEM-1024 (FIPS 203) - formally verified implementation
-libcrux-ml-kem = "0.0.9"
+libcrux-ml-kem = "0.0.10"
 
 # AES-256-GCM
 aes-gcm = "0.10"
