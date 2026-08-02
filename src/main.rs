@@ -418,8 +418,8 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     let kem_len = u32::from_be_bytes(
         data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read public key length field"))?
     ) as usize;
-    if kem_len == 0 || kem_len > 8000 {
-        bail!("Invalid ML-KEM public key length");
+    if kem_len != MLKEM1024_PUBLIC_KEY_SIZE {
+        bail!("Invalid ML-KEM public key length: expected {} bytes, got {}", MLKEM1024_PUBLIC_KEY_SIZE, kem_len);
     }
 
     let expected_len = 4 + kem_len + X25519_PUBLIC_KEY_SIZE;
@@ -443,8 +443,8 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveD
     let kem_len = u32::from_be_bytes(
         data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read private key length field"))?
     ) as usize;
-    if kem_len == 0 || kem_len > 10000 {
-        bail!("Invalid ML-KEM private key length");
+    if kem_len != MLKEM1024_PRIVATE_KEY_SIZE {
+        bail!("Invalid ML-KEM private key length: expected {} bytes, got {}", MLKEM1024_PRIVATE_KEY_SIZE, kem_len);
     }
 
     let expected_len = 4 + kem_len + X25519_PRIVATE_KEY_SIZE;

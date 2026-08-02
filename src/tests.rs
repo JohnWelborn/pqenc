@@ -185,6 +185,22 @@
         }
 
         #[test]
+        fn test_parse_public_key_rejects_wrong_length() {
+            // One byte over the exact ML-KEM-1024 size. Previously accepted
+            // by the old `kem_len <= 8000` bound; must now be rejected.
+            let mlkem_pk = vec![0x42; MLKEM1024_PUBLIC_KEY_SIZE + 1];
+            let x25519_pk = [0x33; 32];
+
+            let mut composite = Vec::new();
+            composite.extend_from_slice(&(mlkem_pk.len() as u32).to_be_bytes());
+            composite.extend_from_slice(&mlkem_pk);
+            composite.extend_from_slice(&x25519_pk);
+
+            let result = parse_public_composite_key(&composite);
+            assert!(result.is_err());
+        }
+
+        #[test]
         fn test_parse_private_key_valid() {
             let mlkem_sk = vec![0x42; 3168];
             let x25519_sk = [0x33; 32];
@@ -199,6 +215,22 @@
 
             assert_eq!(parsed_mlkem.data, mlkem_sk);
             assert_eq!(parsed_x25519.data.as_slice(), &x25519_sk);
+        }
+
+        #[test]
+        fn test_parse_private_key_rejects_wrong_length() {
+            // One byte over the exact ML-KEM-1024 size. Previously accepted
+            // by the old `kem_len <= 10000` bound; must now be rejected.
+            let mlkem_sk = vec![0x42; MLKEM1024_PRIVATE_KEY_SIZE + 1];
+            let x25519_sk = [0x33; 32];
+
+            let mut composite = Vec::new();
+            composite.extend_from_slice(&(mlkem_sk.len() as u32).to_be_bytes());
+            composite.extend_from_slice(&mlkem_sk);
+            composite.extend_from_slice(&x25519_sk);
+
+            let result = parse_private_composite_key(&composite);
+            assert!(result.is_err());
         }
     }
 
