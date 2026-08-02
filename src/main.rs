@@ -758,8 +758,7 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     let mut key_gen_randomness = [0u8; 64];
     rand::rng().fill_bytes(&mut key_gen_randomness);
     let key_pair = mlkem1024::generate_key_pair(key_gen_randomness);
-    let mlkem_public = key_pair.public_key();
-    let mlkem_secret = key_pair.private_key();
+    let (mut mlkem_secret, mlkem_public) = key_pair.into_parts();
     key_gen_randomness.zeroize();
 
     // Generate X25519 keypair (static for long-term storage)
@@ -830,8 +829,13 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
         pem_encode(&encrypted_priv, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)
     };
 
-    // Zeroize sensitive data
-    drop(key_pair);
+    // Zeroize sensitive data. MlKemPrivateKey has no Drop/ZeroizeOnDrop — an
+    // upstream gap in libcrux-ml-kem 0.0.9 (confirmed: no Zeroize impl behind
+    // any feature) — so the real backing bytes are wiped in place via its
+    // IndexMut impl. Not followed by `drop(mlkem_secret)`: that type still
+    // has no Drop, so an explicit drop would just be clippy::drop_non_drop
+    // again.
+    mlkem_secret[0..MLKEM1024_PRIVATE_KEY_SIZE].zeroize();
     drop(x25519_secret);
     composite_priv.zeroize();
 
@@ -1303,7 +1307,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     let mut mlkem_sk_array: [u8; 3168] = mlkem_sk.data.as_slice()
         .try_into()
         .context("Invalid ML-KEM secret key size")?;
-    let private_key = mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array);
+    let mut private_key = mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array);
     mlkem_sk_array.zeroize();
 
     // Deserialize ciphertext (1568 bytes)
@@ -1316,6 +1320,10 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     let mut shared_secret = mlkem1024::decapsulate(&private_key, &ciphertext);
     let kem_secret_guard = SensitiveData::new(shared_secret.to_vec());
     shared_secret.zeroize();
+    // private_key's own copy of the secret key isn't covered by the
+    // mlkem_sk_array.zeroize() above (that only wiped the original array
+    // this struct copied from) — see the identical note in generate_keys.
+    private_key[0..MLKEM1024_PRIVATE_KEY_SIZE].zeroize();
 
     // X25519 exchange - recreate static secret from stored bytes
     let mut x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()
