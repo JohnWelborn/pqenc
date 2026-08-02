@@ -19,7 +19,7 @@ fn test_full_workflow_small_file() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -55,7 +55,7 @@ fn test_sha256_matches_before_encryption_and_after_decryption() {
     let original_hash = Sha256::digest(&input_data.plaintext);
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -87,7 +87,7 @@ fn test_empty_file() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -119,7 +119,7 @@ fn test_exactly_one_chunk() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -151,7 +151,7 @@ fn test_wrong_passphrase_fails() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -188,7 +188,7 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -200,7 +200,7 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     // prompt at all for a plain-text key, or this would hang/fail on a
     // closed-stdin read instead of succeeding.
     let output = Command::new(pqenc_binary())
-        .args(&["decrypt",
+        .args(["decrypt",
             "--decrypt", encrypted_path.to_str().unwrap(),
             "--output", decrypted_path.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap()])
@@ -223,7 +223,7 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -234,7 +234,7 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     // A script that always passes a passphrase variable shouldn't need to
     // special-case a plain-text key: the passphrase should just be ignored.
     let output = Command::new(pqenc_binary())
-        .args(&["decrypt",
+        .args(["decrypt",
             "--decrypt", encrypted_path.to_str().unwrap(),
             "--output", decrypted_path.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap(),
@@ -256,7 +256,7 @@ fn test_file_format_has_magic_bytes() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -278,7 +278,7 @@ fn test_optional_output_defaults_round_trip() {
 
     // Encrypt without -o: should default to <input>.pqe
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
         .output()
@@ -296,7 +296,7 @@ fn test_optional_output_defaults_round_trip() {
     // Decrypt without -o: should restore the original filename, captured
     // via Path::file_name() at encrypt time, next to the .pqe file.
     let output = Command::new(pqenc_binary())
-        .args(&["decrypt",
+        .args(["decrypt",
             "--decrypt", expected_encrypted_path.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap(),
             "--passphrase", TEST_PASSPHRASE])
@@ -324,7 +324,7 @@ fn test_decrypt_restores_original_mtime() {
 
     let encrypted_path = env.file_path("timed.bin.pqe");
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -335,7 +335,7 @@ fn test_decrypt_restores_original_mtime() {
 
     let decrypted_path = env.file_path("timed_restored.bin");
     let output = Command::new(pqenc_binary())
-        .args(&["decrypt",
+        .args(["decrypt",
             "--decrypt", encrypted_path.to_str().unwrap(),
             "--output", decrypted_path.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap(),
@@ -363,7 +363,7 @@ fn test_large_file_multiple_chunks() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -404,7 +404,7 @@ fn test_exact_multiple_of_chunk_size_with_trailer() {
     let decrypted_path = env.file_path("twochunk_dec.bin");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -444,7 +444,7 @@ fn test_encrypt_refuses_existing_output() {
     let encrypted_path = env.create_file("occupied.enc", SENTINEL);
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -475,7 +475,7 @@ fn test_encrypt_success_leaves_no_temp_file() {
     let decrypted_path = env.file_path("clean_dec.bin");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -512,7 +512,7 @@ fn test_encrypted_output_permissions() {
     let encrypted_path = env.file_path("perms.enc");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -551,7 +551,7 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     let dir = encrypted_path.parent().unwrap().to_path_buf();
 
     let mut child = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", "-",
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -615,7 +615,7 @@ fn run_generate_keys(pub_path: &std::path::Path, priv_path: &std::path::Path)
     -> std::process::Output
 {
     Command::new(pqenc_binary())
-        .args(&["generate-keys",
+        .args(["generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap()])
         .stdin(std::process::Stdio::null())
@@ -631,7 +631,7 @@ fn run_generate_keys_answering_prompts(
     priv_path: &std::path::Path,
 ) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(&["generate-keys",
+        .args(["generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap(),
             "--passphrase", TEST_PASSPHRASE])
@@ -752,7 +752,7 @@ fn test_generate_keys_key_file_permissions() {
         .arg("-c")
         .arg(r#"umask 022; exec "$0" "$@""#)
         .arg(pqenc_binary())
-        .args(&["generate-keys",
+        .args(["generate-keys",
             "--public-key", pub_path.to_str().unwrap(),
             "--private-key", priv_path.to_str().unwrap(),
             "--passphrase", TEST_PASSPHRASE])
@@ -800,7 +800,7 @@ fn test_generate_keys_prints_fingerprint_and_randomart() {
     let priv_key = env.file_path("priv.key");
 
     let output = Command::new(pqenc_binary())
-        .args(&["generate-keys",
+        .args(["generate-keys",
             "--public-key", pub_key.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap(),
             "--passphrase", TEST_PASSPHRASE])
@@ -822,14 +822,14 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let from_pub = Command::new(pqenc_binary())
-        .args(&["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(from_pub.status.success());
     let from_pub_stdout = String::from_utf8_lossy(&from_pub.stdout).into_owned();
 
     let from_priv = Command::new(pqenc_binary())
-        .args(&["fingerprint",
+        .args(["fingerprint",
             "--private-key", priv_key.to_str().unwrap(),
             "--passphrase", TEST_PASSPHRASE])
         .output()
@@ -854,14 +854,14 @@ fn test_fingerprint_requires_exactly_one_key_source() {
 
     // Neither flag supplied.
     let neither = Command::new(pqenc_binary())
-        .args(&["fingerprint"])
+        .args(["fingerprint"])
         .output()
         .unwrap();
     assert!(!neither.status.success());
 
     // Both flags supplied.
     let both = Command::new(pqenc_binary())
-        .args(&["fingerprint",
+        .args(["fingerprint",
             "--public-key", pub_key.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap()])
         .output()
@@ -878,7 +878,7 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     let encrypted_path = env.file_path("input.enc");
 
     let encrypt_output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -891,7 +891,7 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     assert!(encrypt_stdout.contains("Recipient key's randomart image is:"), "stdout: {}", encrypt_stdout);
 
     let fingerprint_output = Command::new(pqenc_binary())
-        .args(&["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     let fingerprint_stdout = String::from_utf8_lossy(&fingerprint_output.stdout).into_owned();

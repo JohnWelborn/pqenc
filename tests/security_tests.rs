@@ -26,7 +26,7 @@ fn test_truncation_attack_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -62,7 +62,7 @@ fn test_bit_flip_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -100,7 +100,7 @@ fn test_encryption_is_nondeterministic() {
     // Encrypt twice with same data
     for enc_path in [&enc1_path, &enc2_path] {
         let output = Command::new(pqenc_binary())
-            .args(&["encrypt",
+            .args(["encrypt",
                 "--encrypt", input_path.to_str().unwrap(),
                 "--output", enc_path.to_str().unwrap(),
                 "--public-key", pub_key.to_str().unwrap()])
@@ -129,7 +129,7 @@ fn test_encrypted_file_does_not_contain_plaintext_content() {
     let encrypted_path = env.file_path("payload.txt.pqe");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -157,7 +157,7 @@ fn test_encrypted_file_does_not_contain_original_filename() {
     let encrypted_path = env.file_path("out.pqe");
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -205,7 +205,7 @@ fn test_header_tampering_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -242,7 +242,7 @@ fn test_ciphertext_tampering_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])

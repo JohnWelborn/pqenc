@@ -14,7 +14,7 @@ fn encrypt_bytes(env: &TempTestEnv, name: &str, plaintext: &[u8]) -> Vec<u8> {
     let encrypted_path = env.file_path(&format!("{name}.pqe"));
 
     let output = Command::new(pqenc_binary())
-        .args(&["encrypt",
+        .args(["encrypt",
             "--encrypt", input_path.to_str().unwrap(),
             "--output", encrypted_path.to_str().unwrap(),
             "--public-key", pub_key.to_str().unwrap()])
@@ -28,7 +28,7 @@ fn encrypt_bytes(env: &TempTestEnv, name: &str, plaintext: &[u8]) -> Vec<u8> {
 
 fn run_verify(path: &std::path::Path) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(&["verify", "--verify", path.to_str().unwrap()])
+        .args(["verify", "--verify", path.to_str().unwrap()])
         .output()
         .unwrap()
 }
@@ -172,7 +172,7 @@ fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
 
 fn run_decrypt(input: &std::path::Path, output: &std::path::Path, priv_key: &std::path::Path) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(&["decrypt",
+        .args(["decrypt",
             "--decrypt", input.to_str().unwrap(),
             "--output", output.to_str().unwrap(),
             "--private-key", priv_key.to_str().unwrap(),

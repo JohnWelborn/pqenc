@@ -34,7 +34,7 @@ impl TempTestEnv {
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
         let output = Command::new(binary)
-            .args(&[
+            .args([
                 "generate-keys",
                 "--public-key", self.pub_key_path.to_str().unwrap(),
                 "--private-key", self.priv_key_path.to_str().unwrap(),
@@ -61,7 +61,7 @@ impl TempTestEnv {
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
         let result = Command::new(binary)
-            .args(&[
+            .args([
                 "decrypt",
                 "--decrypt", input,
                 "--output", output,

@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use std::hint::black_box;
 use std::process::Command;
 use std::fs;
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
         let _ = fs::remove_file(&priv_key);
 
         let output = Command::new(pqenc_binary())
-            .args(&["generate-keys",
+            .args(["generate-keys",
                 "--public-key", pub_key.to_str().unwrap(),
                 "--private-key", priv_key.to_str().unwrap(),
                 "--passphrase", BENCH_PASSPHRASE])
@@ -59,7 +60,7 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let output = Command::new(pqenc_binary())
-                        .args(&["encrypt",
+                        .args(["encrypt",
                             "--encrypt", input_path.to_str().unwrap(),
                             "--output", output_path.to_str().unwrap(),
                             "--public-key", pub_key.to_str().unwrap()])
@@ -93,7 +94,7 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
 
         // Encrypt once
         Command::new(pqenc_binary())
-            .args(&["encrypt",
+            .args(["encrypt",
                 "--encrypt", input_path.to_str().unwrap(),
                 "--output", encrypted_path.to_str().unwrap(),
                 "--public-key", pub_key.to_str().unwrap()])
@@ -106,7 +107,7 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let output = Command::new(pqenc_binary())
-                        .args(&["decrypt",
+                        .args(["decrypt",
                             "--decrypt", encrypted_path.to_str().unwrap(),
                             "--output", output_path.to_str().unwrap(),
                             "--private-key", priv_key.to_str().unwrap(),
@@ -136,7 +137,7 @@ fn benchmark_key_generation(c: &mut Criterion) {
             let priv_key = temp_dir.join(format!("keygen_priv_{}.pem", rand::random::<u32>()));
 
             let output = Command::new(pqenc_binary())
-                .args(&["generate-keys",
+                .args(["generate-keys",
                     "--public-key", pub_key.to_str().unwrap(),
                     "--private-key", priv_key.to_str().unwrap(),
                     "--passphrase", BENCH_PASSPHRASE])
