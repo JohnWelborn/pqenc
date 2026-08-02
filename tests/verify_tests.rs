@@ -226,3 +226,34 @@ fn test_decrypt_fails_before_decrypting_when_verify_fails() {
     assert!(stderr.contains("CHECKSUM MISMATCH"), "expected a checksum mismatch error, got: {stderr}");
     assert!(!output_path.exists(), "no output file should be created when the verify preflight fails");
 }
+
+#[test]
+fn test_decrypt_rejects_occupied_output_before_running_verify() {
+    // An explicit --output that already exists must be reported immediately,
+    // without first paying for the full-file checksum preflight -- this is
+    // decrypt's fail-fast output handling. Using a corrupted input (which
+    // would otherwise fail verify with CHECKSUM MISMATCH) proves the claim
+    // check ran first: if verify ran before the claim, this would fail with
+    // a checksum error instead, and the sentinel file would still exist but
+    // that wouldn't demonstrate ordering.
+    const SENTINEL: &[u8] = b"pre-existing output that must not be touched";
+
+    let env = TempTestEnv::new();
+    let mut bytes = encrypt_bytes(&env, "data.bin", b"some content to decrypt");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    let encrypted_path = env.file_path("data.bin.pqe");
+    fs::write(&encrypted_path, &bytes).unwrap();
+    let priv_key = env.file_path("test_priv.pem");
+    let output_path = env.create_file("data_restored.bin", SENTINEL);
+
+    let output = run_decrypt(&encrypted_path, &output_path, &priv_key);
+    assert!(!output.status.success(), "decrypt should refuse an occupied --output path");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already exists"),
+            "expected an 'already exists' error reported before the checksum scan, got: {stderr}");
+    assert!(!stderr.contains("CHECKSUM MISMATCH"),
+            "verify's checksum preflight must not run before the output claim: {stderr}");
+    assert_eq!(fs::read(&output_path).unwrap(), SENTINEL, "pre-existing output file was modified");
+}

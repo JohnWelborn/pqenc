@@ -1714,23 +1714,26 @@ fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result
 /// Decrypts a file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
 ///
 /// Performs hybrid post-quantum decryption:
-/// 1. Runs `verify_file` as a preflight -- structure and, if present, the
+/// 1. If an explicit output path was given, claims it immediately
+///    (fail-fast) -- before the checksum preflight below, so an occupied
+///    destination is reported without first scanning the whole input file
+/// 2. Runs `verify_file` as a preflight -- structure and, if present, the
 ///    checksum trailer -- before touching the private key at all, so
 ///    accidental corruption is reported clearly and cheaply rather than
 ///    partway through the slower chunk-by-chunk AEAD pass
-/// 2. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
+/// 3. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
 ///    and, for PQE2, the cleartext extension and encrypted metadata regions)
-/// 3. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
+/// 4. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
 ///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
-/// 4. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
-/// 5. Performs X25519 key exchange with ephemeral public key
-/// 6. Combines secrets and derives the AES-256 key using HKDF-SHA256
-/// 7. For PQE2, decrypts and parses the metadata region (original filename, mtime, atime)
-/// 8. Resolves the output path -- the given `output_path`, or, if omitted, a
+/// 5. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
+/// 6. Performs X25519 key exchange with ephemeral public key
+/// 7. Combines secrets and derives the AES-256 key using HKDF-SHA256
+/// 8. For PQE2, decrypts and parses the metadata region (original filename, mtime, atime)
+/// 9. Resolves the output path if not already claimed in step 1 -- a
 ///    sanitized embedded filename, or a `.pqe`-stripped fallback
-/// 9. Decrypts chunks using AES-256-GCM, verifying authentication tags
-/// 10. Deletes partial output and returns error if integrity check fails
-/// 11. Best-effort restores mtime/atime from the metadata region, if present
+/// 10. Decrypts chunks using AES-256-GCM, verifying authentication tags
+/// 11. Deletes partial output and returns error if integrity check fails
+/// 12. Best-effort restores mtime/atime from the metadata region, if present
 ///
 /// # Arguments
 /// * `input_path` - Path to encrypted file
@@ -1754,20 +1757,15 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
         bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
     }
 
-    // Preflight: verify structure and (if present) the checksum trailer
-    // before doing any key-dependent work -- catches accidental corruption
-    // with a clear error before spending time on the private key (which may
-    // mean an interactive passphrase prompt) or the chunk-by-chunk AEAD pass.
-    println!("Running verify...");
-    verify_file(input_path).context("Verification failed; aborting decrypt")?;
-    println!("Verify passed. Decrypting...");
-
-    // If -o was given, claim it immediately (fail-fast, matches prior
-    // behavior: using create_new(true) anchors on a file descriptor rather
-    // than checking existence separately, eliminating the check-then-rename
-    // TOCTOU window). If omitted, claiming is deferred until the
-    // metadata-derived default is known (see below), since that requires
-    // decrypting the metadata region, which requires the private key.
+    // If -o was given, claim it immediately (fail-fast: using create_new(true)
+    // anchors on a file descriptor rather than checking existence separately,
+    // eliminating the check-then-rename TOCTOU window) -- and, crucially,
+    // *before* the checksum preflight below, so an occupied destination is
+    // reported without first scanning the entire (potentially large) input
+    // file. If omitted, claiming is deferred until the metadata-derived
+    // default is known (see below), since that requires decrypting the
+    // metadata region, which requires the private key -- so for that case
+    // the preflight still runs first regardless.
     let early_claim: Option<(String, TempFileGuard, TempFileGuard)> = match output_path {
         Some(o) => {
             validate_path(o, false, false, "Output file")?;
@@ -1776,6 +1774,14 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
         }
         None => None,
     };
+
+    // Preflight: verify structure and (if present) the checksum trailer
+    // before doing any key-dependent work -- catches accidental corruption
+    // with a clear error before spending time on the private key (which may
+    // mean an interactive passphrase prompt) or the chunk-by-chunk AEAD pass.
+    println!("Running verify...");
+    verify_file(input_path).context("Verification failed; aborting decrypt")?;
+    println!("Verify passed. Decrypting...");
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
     let composite_priv = load_private_key(private_key_path, passphrase)?;
