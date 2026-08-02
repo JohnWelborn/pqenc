@@ -165,7 +165,7 @@ enum Commands {
         private_key: String,
         #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Pass an empty value to store/read the private key in plain text (not recommended).")]
+            Not needed for a plain-text private key; if supplied, it is ignored.")]
         passphrase: Option<String>,
     },
     Fingerprint {
@@ -173,7 +173,7 @@ enum Commands {
         key_source: KeySource,
         #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Pass an empty value to read a plain-text private key (not recommended).")]
+            Not needed for a plain-text private key; if supplied, it is ignored.")]
         passphrase: Option<String>,
     },
 }
@@ -486,12 +486,13 @@ fn extract_public_from_private(mlkem_sk: &[u8], x25519_sk: &[u8]) -> Result<Vec<
     if mlkem_sk.len() != MLKEM1024_PRIVATE_KEY_SIZE {
         bail!("Invalid ML-KEM private key size");
     }
-    let x25519_sk_bytes: [u8; X25519_PRIVATE_KEY_SIZE] = x25519_sk.try_into()
+    let mut x25519_sk_bytes: [u8; X25519_PRIVATE_KEY_SIZE] = x25519_sk.try_into()
         .map_err(|_| anyhow::anyhow!("Invalid X25519 private key size"))?;
 
     let mlkem_pk = &mlkem_sk[MLKEM1024_PUBLIC_KEY_OFFSET..MLKEM1024_PUBLIC_KEY_OFFSET + MLKEM1024_PUBLIC_KEY_SIZE];
 
     let x25519_secret = StaticSecret::from(x25519_sk_bytes);
+    x25519_sk_bytes.zeroize();
     let x25519_public = X25519PublicKey::from(&x25519_secret);
 
     let mut composite_pub = Vec::with_capacity(4 + mlkem_pk.len() + X25519_PUBLIC_KEY_SIZE);
@@ -1225,24 +1226,8 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     // Atomically claim the output path before any decryption work begins.
     // Using create_new(true) anchors on a file descriptor rather than checking
     // existence separately, eliminating the check-then-rename TOCTOU window.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(output_path)
-            .context("Output file already exists or cannot be created")?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output_path)
-            .context("Output file already exists or cannot be created")?;
-    }
+    create_new_exclusive(output_path, OWNER_ONLY_MODE)
+        .context("Output file already exists or cannot be created")?;
     let mut output_guard = TempFileGuard::new(output_path.to_string());
 
     // Generate temporary file path for atomic write
@@ -1351,22 +1336,7 @@ fn decrypt_file(input_path: &str, output_path: &str, private_key_path: &str, pas
     combined_secret.zeroize();
 
     // Create temporary output file with restrictive permissions (0o600 on Unix)
-    #[cfg(unix)]
-    let mut fout = {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(temp_guard.path())
-            .context("Failed to create temporary output file")?
-    };
-
-    #[cfg(not(unix))]
-    let mut fout = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp_guard.path())
+    let mut fout = create_new_exclusive(temp_guard.path(), OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
 
     // Perform decryption - any error will trigger cleanup of temp file
