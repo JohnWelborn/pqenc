@@ -26,7 +26,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Formally verified** - Uses libcrux, a formally verified cryptography library
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
-- **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
+- **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup; if a hard kill or power loss interrupts before the rename, pqenc recognizes its own leftover reservation placeholder and safely reclaims it on the next attempt to the same path
 - **Key fingerprints & randomart** - `ssh-keygen`-style `SHA256:` fingerprints and ASCII-art visualization, shown at key generation and encryption time and available on demand via `pqenc fingerprint`, so a mismatched keypair can be caught by eye instead of only at restore time
 - **Metadata restoration** - the original filename, modification time, and access time are captured, encrypted, and authenticated at encrypt time, and restored automatically on decrypt when `--output` is omitted; restoration is best-effort and never fails the decrypt
 - **Corruption detection without the private key** - every encrypted file carries a SHA-256 checksum trailer over its own bytes, computed incrementally during encryption; `pqenc verify` recomputes and compares it, plus magic-byte/structural checks, with no key or passphrase, so it's safe to run unattended, e.g. in cron right after each backup. `pqenc decrypt` also runs this same check automatically, as a preflight before touching the private key, so a corrupted file is rejected with a clear error up front rather than partway through decryption. This is a plain checksum, not cryptographic authentication: it catches accidental corruption (bit rot, truncation, a bad copy), not deliberate tampering. Deliberate tampering is still caught by the AEAD tags at actual decrypt time
@@ -118,9 +118,16 @@ Encrypted output is written with mode `0600` (owner read/write only). If a backu
 agent running as a different user needs to read it, adjust permissions or ownership
 after encryption.
 
-Encryption refuses to overwrite an existing output file. Because output is written
-atomically, a failed or interrupted run leaves no partial file behind, so the next
-run is not blocked by a leftover stump.
+Encryption refuses to overwrite an existing output file. Output is claimed by
+creating a small placeholder file at the destination path before any encryption
+work begins -- this claim is also what makes the "refuses to overwrite" check
+atomic and race-free -- and the real ciphertext is streamed to a sibling
+temporary file and renamed into place only on success. An ordinary failure
+removes the placeholder immediately, so a normal retry to the same path just
+works. A hard kill (e.g. `SIGKILL`) or power loss can't run that cleanup and
+may leave the placeholder behind, but pqenc recognizes its own placeholders
+and safely reclaims them on the next attempt to the same path, so retries are
+not permanently blocked.
 
 ### 4. Check backup integrity without the private key (optional, cron-friendly)
 

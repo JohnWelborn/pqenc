@@ -82,6 +82,27 @@ const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
 const TRAILER_SIZE: usize = 32;
 const MAGIC_V1: &[u8] = b"PQE1";
 const MAGIC_V2: &[u8] = b"PQE2";
+
+// Reservation-placeholder marker and staleness threshold for
+// claim_output_and_temp's reclaim logic (TODO.md #1). Deliberately does not
+// start with MAGIC_V1/MAGIC_V2 above, so it can never be mistaken for real
+// ciphertext by anything, including this tool, that inspects the file.
+const RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
+
+// Minimum age a placeholder must have before it's eligible for reclaim.
+// Without this, a second, still-running pqenc process targeting the same
+// output_path would look "stale" to a concurrent invocation the instant its
+// placeholder is written (its marker content is indistinguishable from a
+// genuinely dead one for the run's entire duration), so the second process
+// would reclaim (delete) the first one's live claim and race it to the
+// final rename -- exactly the clobber this claim mechanism exists to
+// prevent. A placeholder from the actual motivating case (SIGKILL, power
+// loss, discovered on a later retry) is essentially never retried within
+// this window, so this doesn't weaken the fix -- it only means reclaim
+// isn't available *yet* in that narrow window, falling back to today's
+// plain "already exists" error, never worse than pre-fix behavior.
+const RESERVATION_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 
@@ -1379,18 +1400,102 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
 /// `-o` claims after the metadata-derived default is known), so the
 /// guard-declaration-order contract (the fix for bug 7fc6654) can't drift
 /// between call sites.
+///
+/// The placeholder is not left empty: it holds `RESERVATION_MARKER`,
+/// written and fsynced before this function returns. If the process is
+/// killed (SIGKILL, power loss) before real output is ever renamed over it
+/// -- a case `TempFileGuard::Drop` cannot run for -- the leftover
+/// placeholder is later recognizable as pqenc's own, instead of an
+/// indistinguishable empty stump that permanently blocks every future run
+/// to the same path. On an `AlreadyExists` collision, if the file already
+/// there is confirmed, via `is_stale_reservation_placeholder`, to be
+/// exactly such a placeholder and at least `RESERVATION_STALE_AGE` old (old
+/// enough that it can't plausibly belong to a still-running process), it is
+/// removed and the claim retried exactly once. Any other outcome -- real
+/// content, wrong size, a symlink, too fresh, or the retry itself failing
+/// -- propagates as an error unchanged, same as before this reclaim
+/// behavior existed.
 fn claim_output_and_temp(
     output_path: &str,
     claim_context: &str,
 ) -> Result<(TempFileGuard, String)> {
     use rand::RngExt;
 
-    create_new_exclusive(output_path, OWNER_ONLY_MODE).context(claim_context.to_string())?;
-    let output_guard = TempFileGuard::new(output_path.to_string());
+    let output_guard = match create_reservation_placeholder(output_path) {
+        Ok(guard) => guard,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AlreadyExists
+                && is_stale_reservation_placeholder(output_path) =>
+        {
+            fs::remove_file(output_path)
+                .context("Failed to remove stale reservation placeholder for reclaim")?;
+            // Retry exactly once. If this also fails -- e.g. a genuine race
+            // with another process that claimed the path in the instant
+            // between the check above and this create -- propagate that
+            // second error untouched; no loop, no repeated retries.
+            create_reservation_placeholder(output_path).context(claim_context.to_string())?
+        }
+        Err(e) => return Err(e).context(claim_context.to_string()),
+    };
 
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
 
     Ok((output_guard, temp_path))
+}
+
+/// Creates `output_path` exclusively and writes+syncs `RESERVATION_MARKER`
+/// into it, returning a `TempFileGuard` armed on it once both the create and
+/// the write/sync have succeeded. Returns the raw `std::io::Error` from
+/// `create_new_exclusive`, uncontextualized, on failure -- so
+/// `claim_output_and_temp` can inspect `.kind()` to decide whether an
+/// `AlreadyExists` collision is eligible for reclaim before any anyhow
+/// context is attached.
+#[must_use = "the returned guard deletes the placeholder when dropped; bind it and disarm on success"]
+fn create_reservation_placeholder(output_path: &str) -> std::io::Result<TempFileGuard> {
+    let mut f = create_new_exclusive(output_path, OWNER_ONLY_MODE)?;
+    let guard = TempFileGuard::new(output_path.to_string());
+
+    let write_result = f.write_all(RESERVATION_MARKER);
+    let sync_result = write_result.and_then(|()| f.sync_all());
+    // Close before any early return below: on Windows, removing an open
+    // file (via TempFileGuard's Drop, if this returns Err) fails with a
+    // sharing violation and would strand the placeholder -- same reasoning
+    // write_new_file_synced documents.
+    drop(f);
+    sync_result?;
+
+    Ok(guard)
+}
+
+/// Returns true iff `path` is exactly pqenc's own stale reservation
+/// placeholder, safe to delete and reclaim: a *regular file*
+/// (`fs::symlink_metadata`, never `fs::metadata` -- a symlink planted at
+/// `path` must never be followed) of exactly `RESERVATION_MARKER.len()`
+/// bytes, whose content is byte-for-byte `RESERVATION_MARKER`, and whose
+/// mtime is at least `RESERVATION_STALE_AGE` old. Anything else -- wrong
+/// type, wrong size, wrong content, an unreadable/future mtime, or an mtime
+/// that's too recent -- returns false, and the caller must treat the path
+/// as a real, untouchable file. Fails safe throughout: any ambiguity or
+/// I/O error means "not stale."
+fn is_stale_reservation_placeholder(path: &str) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != RESERVATION_MARKER.len() as u64 {
+        return false;
+    }
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return false; // clock skew (mtime in the future) -- don't reclaim
+    };
+    if age < RESERVATION_STALE_AGE {
+        return false;
+    }
+    fs::read(path)
+        .map(|contents| contents == RESERVATION_MARKER)
+        .unwrap_or(false)
 }
 
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM.

@@ -7,6 +7,15 @@ fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
 }
 
+/// Must match `RESERVATION_MARKER` in src/main.rs. Duplicated, not shared:
+/// integration tests only exercise the compiled binary via subprocess and
+/// have no access to private items.
+const EXPECTED_RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
+
+/// Must match `RESERVATION_STALE_AGE` in src/main.rs. Duplicated for the
+/// same reason as `EXPECTED_RESERVATION_MARKER` above.
+const RECLAIM_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[test]
 fn test_full_workflow_small_file() {
     let env = TempTestEnv::new();
@@ -705,18 +714,23 @@ fn test_encrypted_output_permissions() {
     );
 }
 
-/// Regression test for partial output on interrupted encryption.
+/// Regression test for partial output on interrupted encryption, and for
+/// TODO.md #1's fix: a SIGKILL'd run must leave a reclaimable placeholder,
+/// not a permanent blocker.
 ///
 /// Kills pqenc mid-stream and asserts nothing resembling a finished backup was
 /// left at the output path. Against the pre-atomicity implementation, which
 /// streamed the header and chunks straight to `output_path`, this fails.
+/// Then retries a real encrypt to the same output path and asserts it
+/// succeeds — against the pre-reclaim implementation, which left an empty,
+/// permanently blocking stump at that path, this fails.
 ///
 /// stdin is deliberately never closed, so the child cannot reach EOF and finish
 /// on its own no matter how fast it encrypts — that is what keeps the timing
 /// non-flaky. The writer thread stops when the kill breaks the pipe.
 #[cfg(unix)]
 #[test]
-fn test_encrypt_killed_midstream_leaves_no_partial_output() {
+fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
     use std::io::Write;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -772,20 +786,14 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     child.wait().unwrap();
     let _ = writer.join();
 
-    // Core assertion: no partial ciphertext at the destination. A SIGKILL cannot
-    // run Drop, so the 0-byte placeholder legitimately survives — but it must
-    // never contain data that could be mistaken for a completed backup.
-    if let Ok(meta) = fs::metadata(&encrypted_path) {
+    // Core assertion: no partial ciphertext at the destination. A SIGKILL
+    // cannot run Drop, so the placeholder legitimately survives — but it
+    // must hold exactly pqenc's own recognizable reservation marker, never
+    // data that could be mistaken for a completed backup.
+    if let Ok(contents) = fs::read(&encrypted_path) {
         assert_eq!(
-            meta.len(),
-            0,
-            "Interrupted encryption left {} bytes of partial output at the destination",
-            meta.len()
-        );
-        assert_ne!(
-            fs::read(&encrypted_path).unwrap().get(..4),
-            Some(&b"PQE2"[..]),
-            "Interrupted encryption left a pqenc header at the destination"
+            contents, EXPECTED_RESERVATION_MARKER,
+            "Interrupted encryption should leave pqenc's reservation placeholder verbatim, not partial output"
         );
     }
 
@@ -801,6 +809,67 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
         temp_bytes.get(..4),
         Some(&b"PQE2"[..]),
         "Temp file should hold the real output stream"
+    );
+
+    // Follow-up: retry is no longer permanently blocked. Reclaim requires
+    // the placeholder to be RECLAIM_STALE_AGE old (so a live concurrent run
+    // is never mistaken for a dead one) -- this process's own placeholder
+    // is only milliseconds old, so backdate its mtime to simulate a retry
+    // long after the crash, the way the real motivating scenario actually
+    // plays out, without the test itself sleeping for minutes.
+    filetime::set_file_mtime(
+        &encrypted_path,
+        filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - RECLAIM_STALE_AGE - Duration::from_secs(1),
+        ),
+    )
+    .unwrap();
+
+    // A second, real (non-killed) encrypt to the exact same output path must
+    // now succeed -- the leftover placeholder must be recognized as pqenc's
+    // own and reclaimed.
+    let retry_input = env.create_file("retry_input.txt", b"retry after SIGKILL must succeed");
+    let retry_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            "--encrypt",
+            retry_input.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        retry_output.status.success(),
+        "Retry to the same output path after a SIGKILL should succeed, not be blocked by the leftover placeholder: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
+
+    // And it must be real, valid ciphertext -- round-trip it.
+    let retry_decrypted = env.file_path("retry_decrypted.txt");
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        retry_decrypted.to_str().unwrap(),
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(&retry_decrypted).unwrap(),
+        b"retry after SIGKILL must succeed"
+    );
+
+    // The retry's own temp file is renamed away and disarmed on success, same
+    // as any normal encrypt -- it must not add a NEW leftover. The original
+    // kill's own orphaned temp file (`leftovers`, asserted non-empty above)
+    // is a separate, pre-existing artifact this fix was never meant to clean
+    // up -- only the output-path placeholder is reclaimed -- so it's expected
+    // to still be there; assert the count didn't grow, not that it's zero.
+    assert_eq!(
+        temp_artifacts(&dir).len(),
+        leftovers.len(),
+        "Successful retry should not leave a new temp artifact behind"
     );
 }
 

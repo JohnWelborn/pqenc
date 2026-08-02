@@ -1177,3 +1177,124 @@ mod claim_output_and_temp_tests {
         );
     }
 }
+
+// Regression tests for TODO.md #1's reclaim fix: a placeholder left behind
+// by a process that was SIGKILLed or lost power before it could clean up
+// (TempFileGuard::Drop cannot run in either case) must be recognized as
+// pqenc's own stale reservation and safely reclaimed on the next attempt --
+// but only when it is *exactly* that, and old enough that it can't
+// plausibly belong to a still-running concurrent pqenc process.
+mod reservation_reclaim_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn backdate(path: &std::path::Path, age: Duration) {
+        let when = SystemTime::now() - age;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
+    }
+
+    #[test]
+    fn test_stale_marker_placeholder_is_reclaimed_and_claim_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let output_path = dir.path().join("output.enc");
+
+        fs::write(&output_path, RESERVATION_MARKER).unwrap();
+        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
+
+        let (output_guard, _temp_path) =
+            claim_output_and_temp(output_path.to_str().unwrap(), "test claim context")
+                .expect("a stale reservation placeholder must be silently reclaimed");
+
+        assert_eq!(
+            fs::read(&output_path).unwrap(),
+            RESERVATION_MARKER,
+            "claim must leave a fresh reservation placeholder in place"
+        );
+        drop(output_guard);
+        assert!(
+            !output_path.exists(),
+            "guard still cleans up the reclaimed placeholder normally"
+        );
+    }
+
+    #[test]
+    fn test_fresh_marker_placeholder_is_not_reclaimed() {
+        // Simulates a genuinely concurrent, still-running pqenc process:
+        // its placeholder legitimately holds the exact marker bytes for its
+        // entire run. Without the age gate this would be wrongly reclaimed
+        // out from under it.
+        let dir = TempDir::new().unwrap();
+        let output_path = dir.path().join("output.enc");
+        fs::write(&output_path, RESERVATION_MARKER).unwrap();
+
+        let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
+        assert!(
+            result.is_err(),
+            "a too-fresh placeholder must not be reclaimed, even with matching content"
+        );
+        assert_eq!(
+            fs::read(&output_path).unwrap(),
+            RESERVATION_MARKER,
+            "the live placeholder must survive a failed claim attempt untouched"
+        );
+    }
+
+    #[test]
+    fn test_unrelated_content_same_length_is_not_reclaimed() {
+        let dir = TempDir::new().unwrap();
+        let output_path = dir.path().join("output.enc");
+
+        let sentinel = vec![b'X'; RESERVATION_MARKER.len()];
+        fs::write(&output_path, &sentinel).unwrap();
+        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
+
+        let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
+        assert!(result.is_err(), "unrelated content must never be reclaimed");
+        assert_eq!(
+            fs::read(&output_path).unwrap(),
+            sentinel,
+            "unrelated file must survive a failed claim attempt byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn test_unrelated_content_different_length_is_not_reclaimed() {
+        let dir = TempDir::new().unwrap();
+        let output_path = dir.path().join("output.enc");
+
+        const SENTINEL: &[u8] = b"short";
+        fs::write(&output_path, SENTINEL).unwrap();
+        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
+
+        let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
+        assert!(result.is_err());
+        assert_eq!(fs::read(&output_path).unwrap(), SENTINEL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_to_matching_content_is_not_reclaimed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target_path = dir.path().join("target_with_marker_bytes");
+        fs::write(&target_path, RESERVATION_MARKER).unwrap();
+        backdate(&target_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
+
+        let link_path = dir.path().join("output.enc");
+        symlink(&target_path, &link_path).unwrap();
+
+        let result = claim_output_and_temp(link_path.to_str().unwrap(), "test claim context");
+        assert!(
+            result.is_err(),
+            "a symlink must never be followed and reclaimed, even if its target matches exactly"
+        );
+        assert!(link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target_path).unwrap(), RESERVATION_MARKER);
+    }
+}
