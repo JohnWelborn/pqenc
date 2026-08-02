@@ -12,15 +12,21 @@ fn generate_keys_with_passphrase(pub_path: &Path, priv_path: &Path) {
     let output = Command::new(binary)
         .args([
             "generate-keys",
-            "--public-key", pub_path.to_str().unwrap(),
-            "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE,
+            "--public-key",
+            pub_path.to_str().unwrap(),
+            "--private-key",
+            priv_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to generate keys");
 
     if !output.status.success() {
-        panic!("Key generation failed: {}", String::from_utf8_lossy(&output.stderr));
+        panic!(
+            "Key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -100,16 +106,23 @@ fn test_encrypt_directory_via_tar_command() {
     let decrypt_output = Command::new(&pqenc_bin)
         .args([
             "decrypt",
-            "--decrypt", encrypted_path.to_str().unwrap(),
-            "--output", decrypted_tar_path.to_str().unwrap(),
-            "--private-key", private_key_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE,
+            "--decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_tar_path.to_str().unwrap(),
+            "--private-key",
+            private_key_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to run pqenc decrypt");
 
-    assert!(decrypt_output.status.success(), "pqenc decrypt failed: {}",
-            String::from_utf8_lossy(&decrypt_output.stderr));
+    assert!(
+        decrypt_output.status.success(),
+        "pqenc decrypt failed: {}",
+        String::from_utf8_lossy(&decrypt_output.stderr)
+    );
 
     // Extract the decrypted tar
     let untar_status = Command::new("tar")
@@ -123,8 +136,10 @@ fn test_encrypt_directory_via_tar_command() {
     // Verify the extracted content matches the original
     let extracted_file = extract_dir.join(dir_name).join(test_file);
     let extracted_content = fs::read(&extracted_file).unwrap();
-    assert_eq!(extracted_content, test_content, "Decrypted content doesn't match original");
-
+    assert_eq!(
+        extracted_content, test_content,
+        "Decrypted content doesn't match original"
+    );
 }
 
 #[test]
@@ -193,16 +208,23 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
     let decrypt_output = Command::new(&pqenc_bin)
         .args([
             "decrypt",
-            "--decrypt", encrypted_path.to_str().unwrap(),
-            "--output", decrypted_tar_path.to_str().unwrap(),
-            "--private-key", private_key_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE,
+            "--decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_tar_path.to_str().unwrap(),
+            "--private-key",
+            private_key_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
         ])
         .output()
         .expect("Failed to run pqenc decrypt");
 
-    assert!(decrypt_output.status.success(), "pqenc decrypt failed: {}",
-            String::from_utf8_lossy(&decrypt_output.stderr));
+    assert!(
+        decrypt_output.status.success(),
+        "pqenc decrypt failed: {}",
+        String::from_utf8_lossy(&decrypt_output.stderr)
+    );
 
     let extract_dir = temp_root.path().join("extracted");
     fs::create_dir(&extract_dir).unwrap();
@@ -216,6 +238,8 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
     assert!(untar_status.success(), "tar extract failed");
 
     let extracted_content = fs::read(extract_dir.join(dir_name).join(test_file)).unwrap();
-    assert_eq!(extracted_content, test_content, "Decrypted content doesn't match original");
-
+    assert_eq!(
+        extracted_content, test_content,
+        "Decrypted content doesn't match original"
+    );
 }

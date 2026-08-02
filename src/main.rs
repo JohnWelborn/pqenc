@@ -59,7 +59,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use base64::prelude::*;
 use clap::{Args, Parser, Subcommand};
 use hkdf::Hkdf;
 use libcrux_ml_kem::mlkem1024;
@@ -68,7 +69,6 @@ use sha2::Sha256;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use base64::prelude::*;
 
 // Constants
 const AES_KEY_SIZE: usize = 32;
@@ -209,9 +209,12 @@ enum Commands {
         public_key: String,
         #[arg(long, short = 's')]
         private_key: String,
-        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+        #[arg(
+            long,
+            help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Pass an empty value to store/read the private key in plain text (not recommended).")]
+            Pass an empty value to store/read the private key in plain text (not recommended)."
+        )]
         passphrase: Option<String>,
     },
     Encrypt {
@@ -223,27 +226,45 @@ enum Commands {
         public_key: String,
     },
     Decrypt {
-        #[arg(long = "decrypt", short = 'i', help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
+        #[arg(
+            long = "decrypt",
+            short = 'i',
+            help = "Input file to decrypt (must be a regular file, not stdin or a pipe)"
+        )]
         input: String,
-        #[arg(long, short = 'o', help = "Output file (default: derived from the original filename embedded in the encrypted file, or by stripping a trailing .pqe from the input path)")]
+        #[arg(
+            long,
+            short = 'o',
+            help = "Output file (default: derived from the original filename embedded in the encrypted file, or by stripping a trailing .pqe from the input path)"
+        )]
         output: Option<String>,
         #[arg(long, short = 's')]
         private_key: String,
-        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+        #[arg(
+            long,
+            help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Not needed for a plain-text private key; if supplied, it is ignored.")]
+            Not needed for a plain-text private key; if supplied, it is ignored."
+        )]
         passphrase: Option<String>,
     },
     Verify {
-        #[arg(long = "verify", short = 'i', help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
+        #[arg(
+            long = "verify",
+            short = 'i',
+            help = "Input file to verify (must be a regular file, not stdin or a pipe)"
+        )]
         input: String,
     },
     Fingerprint {
         #[command(flatten)]
         key_source: KeySource,
-        #[arg(long, help = "Passphrase for the private key, skipping the interactive prompt. \
+        #[arg(
+            long,
+            help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Not needed for a plain-text private key; if supplied, it is ignored.")]
+            Not needed for a plain-text private key; if supplied, it is ignored."
+        )]
         passphrase: Option<String>,
     },
 }
@@ -359,8 +380,12 @@ fn write_new_file_synced(path: &str, contents: &[u8], mode: u32) -> Result<TempF
     // Claim BEFORE arming the guard. Declaring the guard first would arm it
     // before the exclusive create succeeds, so an EEXIST from a pre-existing
     // file would drop the guard and delete the user's real file.
-    let mut f = create_new_exclusive(path, mode)
-        .with_context(|| format!("Failed to create {} (already exists or permission denied)", path))?;
+    let mut f = create_new_exclusive(path, mode).with_context(|| {
+        format!(
+            "Failed to create {} (already exists or permission denied)",
+            path
+        )
+    })?;
     let guard = TempFileGuard::new(path.to_string());
 
     let write_result = f.write_all(contents);
@@ -386,10 +411,12 @@ fn pem_encode(der_bytes: &[u8], begin: &str, end: &str) -> String {
 
 /// Extract PEM body and decode
 fn pem_decode(pem_text: &str, begin: &str, end: &str) -> Result<Vec<u8>> {
-    let start = pem_text.find(begin)
+    let start = pem_text
+        .find(begin)
         .ok_or_else(|| anyhow::anyhow!("Missing PEM header: {}", begin))?;
     let start = start + begin.len();
-    let end_pos = pem_text[start..].find(end)
+    let end_pos = pem_text[start..]
+        .find(end)
         .ok_or_else(|| anyhow::anyhow!("Missing PEM footer: {}", end))?;
 
     let b64 = pem_text[start..start + end_pos]
@@ -397,13 +424,14 @@ fn pem_decode(pem_text: &str, begin: &str, end: &str) -> Result<Vec<u8>> {
         .filter(|c| !c.is_whitespace())
         .collect::<String>();
 
-    BASE64_STANDARD.decode(b64.as_bytes())
+    BASE64_STANDARD
+        .decode(b64.as_bytes())
         .context("Failed to decode base64")
 }
 
 /// Derive encryption key from passphrase using Argon2id
 fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveData> {
-    use argon2::{Argon2, Algorithm, Version, Params};
+    use argon2::{Algorithm, Argon2, Params, Version};
 
     if passphrase.is_empty() {
         bail!("Passphrase cannot be empty");
@@ -421,7 +449,8 @@ fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<Sensitiv
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = vec![0u8; ARGON2_KEY_LENGTH];
-    argon2.hash_password_into(passphrase, salt, &mut key)
+    argon2
+        .hash_password_into(passphrase, salt, &mut key)
         .map_err(|e| anyhow::anyhow!("Argon2 failed: {}", e))?;
 
     Ok(SensitiveData::new(key))
@@ -437,13 +466,15 @@ fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8
     let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
 
-    let ciphertext = cipher.encrypt(
-        Nonce::from_slice(&nonce),
-        Payload {
-            msg: composite_key,
-            aad: b"pqenc-private-key-v1",
-        }
-    ).map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: composite_key,
+                aad: b"pqenc-private-key-v1",
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
     // Return: salt || nonce || ciphertext
     let mut result = Vec::with_capacity(salt.len() + nonce.len() + ciphertext.len());
@@ -468,13 +499,15 @@ fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<Sensi
     let key = derive_key_from_passphrase(passphrase, salt)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
 
-    let plaintext = cipher.decrypt(
-        Nonce::from_slice(nonce),
-        Payload {
-            msg: ciphertext,
-            aad: b"pqenc-private-key-v1",
-        }
-    ).map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: b"pqenc-private-key-v1",
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;
 
     Ok(SensitiveData::new(plaintext))
 }
@@ -486,10 +519,16 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     }
 
     let kem_len = u32::from_be_bytes(
-        data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read public key length field"))?
+        data[..4]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to read public key length field"))?,
     ) as usize;
     if kem_len != MLKEM1024_PUBLIC_KEY_SIZE {
-        bail!("Invalid ML-KEM public key length: expected {} bytes, got {}", MLKEM1024_PUBLIC_KEY_SIZE, kem_len);
+        bail!(
+            "Invalid ML-KEM public key length: expected {} bytes, got {}",
+            MLKEM1024_PUBLIC_KEY_SIZE,
+            kem_len
+        );
     }
 
     let expected_len = 4 + kem_len + X25519_PUBLIC_KEY_SIZE;
@@ -498,7 +537,8 @@ fn parse_public_composite_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     }
 
     let mlkem_pk = data[4..4 + kem_len].to_vec();
-    let x25519_pk: [u8; 32] = data[4 + kem_len..].try_into()
+    let x25519_pk: [u8; 32] = data[4 + kem_len..]
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Failed to extract X25519 public key bytes"))?;
 
     Ok((mlkem_pk, x25519_pk))
@@ -511,10 +551,16 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveD
     }
 
     let kem_len = u32::from_be_bytes(
-        data[..4].try_into().map_err(|_| anyhow::anyhow!("Failed to read private key length field"))?
+        data[..4]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to read private key length field"))?,
     ) as usize;
     if kem_len != MLKEM1024_PRIVATE_KEY_SIZE {
-        bail!("Invalid ML-KEM private key length: expected {} bytes, got {}", MLKEM1024_PRIVATE_KEY_SIZE, kem_len);
+        bail!(
+            "Invalid ML-KEM private key length: expected {} bytes, got {}",
+            MLKEM1024_PRIVATE_KEY_SIZE,
+            kem_len
+        );
     }
 
     let expected_len = 4 + kem_len + X25519_PRIVATE_KEY_SIZE;
@@ -556,10 +602,12 @@ fn extract_public_from_private(mlkem_sk: &[u8], x25519_sk: &[u8]) -> Result<Vec<
     if mlkem_sk.len() != MLKEM1024_PRIVATE_KEY_SIZE {
         bail!("Invalid ML-KEM private key size");
     }
-    let mut x25519_sk_bytes: [u8; X25519_PRIVATE_KEY_SIZE] = x25519_sk.try_into()
+    let mut x25519_sk_bytes: [u8; X25519_PRIVATE_KEY_SIZE] = x25519_sk
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Invalid X25519 private key size"))?;
 
-    let mlkem_pk = &mlkem_sk[MLKEM1024_PUBLIC_KEY_OFFSET..MLKEM1024_PUBLIC_KEY_OFFSET + MLKEM1024_PUBLIC_KEY_SIZE];
+    let mlkem_pk = &mlkem_sk
+        [MLKEM1024_PUBLIC_KEY_OFFSET..MLKEM1024_PUBLIC_KEY_OFFSET + MLKEM1024_PUBLIC_KEY_SIZE];
 
     let x25519_secret = StaticSecret::from(x25519_sk_bytes);
     x25519_sk_bytes.zeroize();
@@ -600,7 +648,11 @@ fn load_private_key(private_key_path: &str, passphrase: Option<String>) -> Resul
             eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
             p.zeroize();
         }
-        Ok(SensitiveData::new(pem_decode(&pem_text, PEM_PRIV_BEGIN, PEM_PRIV_END)?))
+        Ok(SensitiveData::new(pem_decode(
+            &pem_text,
+            PEM_PRIV_BEGIN,
+            PEM_PRIV_END,
+        )?))
     } else {
         if let Some(mut p) = passphrase {
             p.zeroize();
@@ -748,7 +800,9 @@ fn open_input(path: &str) -> Result<Box<dyn Read>> {
     if is_stdin_path(path) {
         Ok(Box::new(std::io::stdin()))
     } else {
-        Ok(Box::new(File::open(path).context("Failed to open input file")?))
+        Ok(Box::new(
+            File::open(path).context("Failed to open input file")?,
+        ))
     }
 }
 
@@ -756,20 +810,36 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::GenerateKeys { public_key, private_key, passphrase } => {
+        Commands::GenerateKeys {
+            public_key,
+            private_key,
+            passphrase,
+        } => {
             generate_keys(&public_key, &private_key, passphrase)?;
         }
-        Commands::Encrypt { input, output, public_key } => {
+        Commands::Encrypt {
+            input,
+            output,
+            public_key,
+        } => {
             let output = resolve_encrypt_output(&input, output)?;
             encrypt_file(&input, &output, &public_key)?;
         }
-        Commands::Decrypt { input, output, private_key, passphrase } => {
+        Commands::Decrypt {
+            input,
+            output,
+            private_key,
+            passphrase,
+        } => {
             decrypt_file(&input, output.as_deref(), &private_key, passphrase)?;
         }
         Commands::Verify { input } => {
             verify_file(&input)?;
         }
-        Commands::Fingerprint { key_source, passphrase } => {
+        Commands::Fingerprint {
+            key_source,
+            passphrase,
+        } => {
             show_fingerprint(key_source.public_key, key_source.private_key, passphrase)?;
         }
     }
@@ -801,7 +871,11 @@ fn run() -> Result<()> {
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err` if files already exist, paths are invalid, or key generation fails
-fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
+fn generate_keys(
+    public_key_path: &str,
+    private_key_path: &str,
+    passphrase: Option<String>,
+) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
     // Validate paths
@@ -809,7 +883,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     validate_path(private_key_path, false, false, "Private key")?;
 
     if public_key_path == private_key_path {
-        bail!("Public and private key paths must differ: {}", public_key_path);
+        bail!(
+            "Public and private key paths must differ: {}",
+            public_key_path
+        );
     }
 
     // Advisory pre-check, in addition to (never instead of) the exclusive create
@@ -825,7 +902,11 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
         (public_key_path, "Public key"),
     ] {
         if fs::symlink_metadata(path).is_ok() {
-            bail!("{} file already exists, refusing to overwrite: {}", description, path);
+            bail!(
+                "{} file already exists, refusing to overwrite: {}",
+                description,
+                path
+            );
         }
     }
 
@@ -869,7 +950,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     let (mut passphrase1, mut passphrase2) = match passphrase {
         Some(p) => (p.clone(), p),
         None => {
-            eprintln!("Enter passphrase for \"{}\" (empty for no passphrase):", display_priv_path);
+            eprintln!(
+                "Enter passphrase for \"{}\" (empty for no passphrase):",
+                display_priv_path
+            );
             let p1 = rpassword::read_password()?;
             eprintln!("Enter same passphrase again:");
             let p2 = rpassword::read_password()?;
@@ -884,7 +968,10 @@ fn generate_keys(public_key_path: &str, private_key_path: &str, passphrase: Opti
     }
     let unencrypted = passphrase1.is_empty();
     if unencrypted {
-        eprintln!("WARNING: \"{}\" will be stored plain text.", display_priv_path);
+        eprintln!(
+            "WARNING: \"{}\" will be stored plain text.",
+            display_priv_path
+        );
     } else if passphrase1.len() < 12 {
         eprintln!("Warning: Passphrase shorter than 12 characters may be weak");
     }
@@ -1017,10 +1104,22 @@ use aes_gcm::aead::consts::U12;
 fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     // Convert 12-byte base nonce to u128 (padding with 4 zero bytes at start)
     let base_int = u128::from_be_bytes([
-        0, 0, 0, 0,
-        base_nonce[0], base_nonce[1], base_nonce[2], base_nonce[3],
-        base_nonce[4], base_nonce[5], base_nonce[6], base_nonce[7],
-        base_nonce[8], base_nonce[9], base_nonce[10], base_nonce[11],
+        0,
+        0,
+        0,
+        0,
+        base_nonce[0],
+        base_nonce[1],
+        base_nonce[2],
+        base_nonce[3],
+        base_nonce[4],
+        base_nonce[5],
+        base_nonce[6],
+        base_nonce[7],
+        base_nonce[8],
+        base_nonce[9],
+        base_nonce[10],
+        base_nonce[11],
     ]);
 
     // Add counter and check for 96-bit overflow (critical for AES-GCM nonce uniqueness)
@@ -1139,7 +1238,9 @@ struct SourceMetadata {
 /// AEAD-encrypted, even when there's nothing to say, so header parsing
 /// never needs a separate "is metadata present" flag.
 fn encode_metadata_plaintext(source: Option<&SourceMetadata>) -> Vec<u8> {
-    let Some(s) = source else { return Vec::new(); };
+    let Some(s) = source else {
+        return Vec::new();
+    };
     let mtime_bytes = encode_timestamp(s.mtime);
     let atime_bytes = encode_timestamp(s.atime);
     let mut fields: Vec<(u8, &[u8])> = Vec::new();
@@ -1183,7 +1284,11 @@ fn decode_metadata_plaintext(plaintext: &[u8]) -> Result<DecodedMetadata> {
             _ => {} // unknown field, forward-compatible: ignore
         }
     }
-    Ok(DecodedMetadata { filename, mtime, atime })
+    Ok(DecodedMetadata {
+        filename,
+        mtime,
+        atime,
+    })
 }
 
 /// Validates a filename embedded in decrypted metadata as a single safe
@@ -1274,11 +1379,13 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
 /// `-o` claims after the metadata-derived default is known), so the
 /// guard-declaration-order contract (the fix for bug 7fc6654) can't drift
 /// between call sites.
-fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(TempFileGuard, String)> {
+fn claim_output_and_temp(
+    output_path: &str,
+    claim_context: &str,
+) -> Result<(TempFileGuard, String)> {
     use rand::RngExt;
 
-    create_new_exclusive(output_path, OWNER_ONLY_MODE)
-        .context(claim_context.to_string())?;
+    create_new_exclusive(output_path, OWNER_ONLY_MODE).context(claim_context.to_string())?;
     let output_guard = TempFileGuard::new(output_path.to_string());
 
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
@@ -1310,7 +1417,7 @@ fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<(Temp
 /// * `Ok(())` on success
 /// * `Err` if validation fails, encryption fails, or I/O errors occur
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
-    use x25519_dalek::{PublicKey as X25519PublicKey, EphemeralSecret};
+    use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
     let is_stdin = is_stdin_path(input_path);
 
@@ -1318,7 +1425,10 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     if !is_stdin {
         let input_p = std::path::Path::new(input_path);
         if input_p.exists() && input_p.is_dir() {
-            let dirname = input_p.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
+            let dirname = input_p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(input_path);
             bail!(
                 "Input file is a directory, not a file: {}\n\n\
                 pqenc can only encrypt individual files. To encrypt a directory:\n\
@@ -1343,7 +1453,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     rand::rng().fill_bytes(&mut encaps_randomness);
 
     // Deserialize public key (1568 bytes for ML-KEM-1024)
-    let mlkem_pk_array: [u8; 1568] = mlkem_pk.as_slice()
+    let mlkem_pk_array: [u8; 1568] = mlkem_pk
+        .as_slice()
         .try_into()
         .context("Invalid ML-KEM public key size")?;
     let public_key = mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array);
@@ -1394,7 +1505,14 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
             .map(|n| n.to_string_lossy().into_owned());
         let mtime = filetime::FileTime::from_last_modification_time(&meta);
         let atime = filetime::FileTime::from_last_access_time(&meta);
-        (Some(meta.len()), Some(SourceMetadata { filename, mtime, atime }))
+        (
+            Some(meta.len()),
+            Some(SourceMetadata {
+                filename,
+                mtime,
+                atime,
+            }),
+        )
     };
 
     // Claim the output path atomically. O_CREAT|O_EXCL both enforces the
@@ -1451,10 +1569,15 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let mut metadata_plaintext = encode_metadata_plaintext(source_metadata.as_ref());
     let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
     let metadata_aad = build_metadata_aad(&prefix_hash);
-    let metadata_ciphertext = metadata_cipher.encrypt(
-        Nonce::from_slice(&base_nonce),
-        Payload { msg: metadata_plaintext.as_slice(), aad: &metadata_aad },
-    ).map_err(|e| anyhow::anyhow!("Metadata encryption failed: {}", e))?;
+    let metadata_ciphertext = metadata_cipher
+        .encrypt(
+            Nonce::from_slice(&base_nonce),
+            Payload {
+                msg: metadata_plaintext.as_slice(),
+                aad: &metadata_aad,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("Metadata encryption failed: {}", e))?;
     metadata_plaintext.zeroize();
     header.extend_from_slice(&(metadata_ciphertext.len() as u32).to_be_bytes());
     header.extend_from_slice(&metadata_ciphertext);
@@ -1503,7 +1626,11 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
             n_next += n;
         }
 
-        let chunk_type = if n_next == 0 { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+        let chunk_type = if n_next == 0 {
+            AAD_CHUNK_TYPE_LAST
+        } else {
+            AAD_CHUNK_TYPE_NORMAL
+        };
         let aad = build_aad(chunk_type, chunk_index, &header_hash);
 
         let nonce = get_nonce(&base_nonce, chunk_index)?;
@@ -1512,7 +1639,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
             aad: &aad,
         };
 
-        let ciphertext = cipher.encrypt(&nonce, payload)
+        let ciphertext = cipher
+            .encrypt(&nonce, payload)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         fout.write_all(&ciphertext)?;
@@ -1535,7 +1663,8 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     let trailer: [u8; TRAILER_SIZE] = trailer_hasher.finalize().into();
     fout.write_all(&trailer)?;
 
-    fout.sync_all().context("Failed to sync output file to disk")?;
+    fout.sync_all()
+        .context("Failed to sync output file to disk")?;
     // Close before rename: required on Windows, and it guarantees the fd is gone
     // before TempFileGuard can unlink on any later error path.
     drop(fout);
@@ -1548,8 +1677,9 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     temp_guard.disarm();
     output_guard.disarm();
 
-    sync_parent_dir(output_path)
-        .context("Failed to sync directory after rename; encrypted output may not survive a crash")?;
+    sync_parent_dir(output_path).context(
+        "Failed to sync directory after rename; encrypted output may not survive a crash",
+    )?;
 
     println!("File encrypted successfully");
     if let Some(size) = input_size {
@@ -1661,7 +1791,10 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
         for &(field_id, value) in &ext_fields {
             if field_id == EXTENSION_FIELD_CHECKSUM_TRAILER {
                 if !value.is_empty() {
-                    bail!("Invalid checksum trailer marker: expected an empty value, got {} bytes", value.len());
+                    bail!(
+                        "Invalid checksum trailer marker: expected an empty value, got {} bytes",
+                        value.len()
+                    );
                 }
                 has_trailer = true;
             }
@@ -1714,13 +1847,16 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
 /// keeps decryption of older, trailer-less files unchanged.
 fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result<u64> {
     let body_end = if has_trailer {
-        file_len.checked_sub(TRAILER_SIZE as u64)
-            .ok_or_else(|| anyhow::anyhow!("Invalid file: too short to contain the declared checksum trailer"))?
+        file_len.checked_sub(TRAILER_SIZE as u64).ok_or_else(|| {
+            anyhow::anyhow!("Invalid file: too short to contain the declared checksum trailer")
+        })?
     } else {
         file_len
     };
     if body_end < header_end_pos + TAG_SIZE as u64 {
-        bail!("Invalid ciphertext: file too short. This may indicate file truncation or corruption.");
+        bail!(
+            "Invalid ciphertext: file too short. This may indicate file truncation or corruption."
+        );
     }
     Ok(body_end)
 }
@@ -1763,16 +1899,23 @@ fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err` if verification fails, validation fails, wrong key, corrupted file, or authentication fails
-fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
+fn decrypt_file(
+    input_path: &str,
+    output_path: Option<&str>,
+    private_key_path: &str,
+    passphrase: Option<String>,
+) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
     // Validate all paths (stdin not supported for decryption - requires seekable input)
     validate_path(input_path, true, false, "Input file")?;
     validate_path(private_key_path, true, false, "Private key")?;
-    let input_meta = fs::metadata(input_path)
-        .context("Failed to read input file metadata")?;
+    let input_meta = fs::metadata(input_path).context("Failed to read input file metadata")?;
     if !input_meta.is_file() {
-        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+        bail!(
+            "Input file must be a regular file, not a directory or special file: {}",
+            input_path
+        );
     }
 
     // If -o was given, claim it immediately (fail-fast: using create_new(true)
@@ -1787,7 +1930,8 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     let early_claim: Option<(String, TempFileGuard, String)> = match output_path {
         Some(o) => {
             validate_path(o, false, false, "Output file")?;
-            let (og, temp_path) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
+            let (og, temp_path) =
+                claim_output_and_temp(o, "Output file already exists or cannot be created")?;
             Some((o.to_string(), og, temp_path))
         }
         None => None,
@@ -1806,7 +1950,8 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     // comment).
     println!("Running verify...");
     let mut fin = File::open(input_path).context("Failed to open input file")?;
-    let verified = verify_open_file(&mut fin, input_path).context("Verification failed; aborting decrypt")?;
+    let verified =
+        verify_open_file(&mut fin, input_path).context("Verification failed; aborting decrypt")?;
     println!("Verify passed. Decrypting...");
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
@@ -1816,8 +1961,16 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     let VerifiedFile { parsed, body_end } = verified;
     let header_end_pos = parsed.header_bytes.len() as u64;
     let ParsedHeader {
-        is_v2, header_hash, prefix_hash, ciphertext_kem, ephemeral_x25519_pk,
-        salt, base_nonce, metadata_ciphertext, has_trailer: _, ..
+        is_v2,
+        header_hash,
+        prefix_hash,
+        ciphertext_kem,
+        ephemeral_x25519_pk,
+        salt,
+        base_nonce,
+        metadata_ciphertext,
+        has_trailer: _,
+        ..
     } = parsed;
 
     // Rewind the verified handle back to the start of the encrypted body --
@@ -1828,14 +1981,17 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
 
     // ML-KEM decapsulation
     // Deserialize private key (3168 bytes for ML-KEM-1024)
-    let mut mlkem_sk_array: [u8; 3168] = mlkem_sk.data.as_slice()
+    let mut mlkem_sk_array: [u8; 3168] = mlkem_sk
+        .data
+        .as_slice()
         .try_into()
         .context("Invalid ML-KEM secret key size")?;
     let mut private_key = mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array);
     mlkem_sk_array.zeroize();
 
     // Deserialize ciphertext (1568 bytes)
-    let ciphertext_array: [u8; 1568] = ciphertext_kem.as_slice()
+    let ciphertext_array: [u8; 1568] = ciphertext_kem
+        .as_slice()
         .try_into()
         .context("Invalid ciphertext size")?;
     let ciphertext = mlkem1024::MlKem1024Ciphertext::from(ciphertext_array);
@@ -1850,7 +2006,10 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     private_key[0..MLKEM1024_PRIVATE_KEY_SIZE].zeroize();
 
     // X25519 exchange - recreate static secret from stored bytes
-    let mut x25519_sk_array: [u8; 32] = x25519_sk.data.as_slice().try_into()
+    let mut x25519_sk_array: [u8; 32] = x25519_sk
+        .data
+        .as_slice()
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Invalid X25519 key size"))?;
     let x25519_private = StaticSecret::from(x25519_sk_array);
     x25519_sk_array.zeroize();
@@ -1858,7 +2017,9 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     let mut shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
 
     if shared_secret_x25519.as_bytes() == &[0u8; 32] {
-        bail!("X25519 key exchange failed: invalid ephemeral public key (low-order point detected)");
+        bail!(
+            "X25519 key exchange failed: invalid ephemeral public key (low-order point detected)"
+        );
     }
 
     // Combine secrets
@@ -1879,13 +2040,21 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
         let metadata_key = derive_metadata_key(&combined_secret, &salt)?;
         let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
         let metadata_aad = build_metadata_aad(&prefix_hash);
-        let mut metadata_plaintext = metadata_cipher.decrypt(
-            Nonce::from_slice(&base_nonce),
-            Payload { msg: metadata_ciphertext.as_slice(), aad: &metadata_aad },
-        ).map_err(|e| anyhow::anyhow!(
-            "Metadata decryption failed (Integrity check failed): {:?}\n\
-            Possible causes: Wrong key, corrupted file, or truncation attack.", e
-        ))?;
+        let mut metadata_plaintext = metadata_cipher
+            .decrypt(
+                Nonce::from_slice(&base_nonce),
+                Payload {
+                    msg: metadata_ciphertext.as_slice(),
+                    aad: &metadata_aad,
+                },
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Metadata decryption failed (Integrity check failed): {:?}\n\
+            Possible causes: Wrong key, corrupted file, or truncation attack.",
+                    e
+                )
+            })?;
         let decoded = decode_metadata_plaintext(&metadata_plaintext)?;
         metadata_plaintext.zeroize();
         Some(decoded)
@@ -1901,10 +2070,15 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     let (final_output_path, mut output_guard, temp_path) = match early_claim {
         Some((path, og, temp_path)) => (path, og, temp_path),
         None => {
-            let embedded = decoded_metadata.as_ref().and_then(|m| m.filename.as_deref());
+            let embedded = decoded_metadata
+                .as_ref()
+                .and_then(|m| m.filename.as_deref());
             let resolved = resolve_decrypt_output(input_path, embedded)?;
             validate_path(&resolved, false, false, "Output file")?;
-            let (og, temp_path) = claim_output_and_temp(&resolved, "Output file already exists or cannot be created")?;
+            let (og, temp_path) = claim_output_and_temp(
+                &resolved,
+                "Output file already exists or cannot be created",
+            )?;
             (resolved, og, temp_path)
         }
     };
@@ -1955,7 +2129,11 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
             }
             body_pos += bytes_read as u64;
 
-            let chunk_type = if body_pos == body_end { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+            let chunk_type = if body_pos == body_end {
+                AAD_CHUNK_TYPE_LAST
+            } else {
+                AAD_CHUNK_TYPE_NORMAL
+            };
             let aad = build_aad(chunk_type, chunk_index, &header_hash);
 
             let nonce = get_nonce(&base_nonce, chunk_index)?;
@@ -1964,11 +2142,13 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
                 aad: &aad,
             };
 
-            let mut plaintext = cipher.decrypt(&nonce, payload)
-                .map_err(|e| anyhow::anyhow!(
+            let mut plaintext = cipher.decrypt(&nonce, payload).map_err(|e| {
+                anyhow::anyhow!(
                     "Decryption failed (Integrity check failed): {:?}\n\
-                    Possible causes: Wrong key, corrupted file, or truncation attack.", e
-                ))?;
+                    Possible causes: Wrong key, corrupted file, or truncation attack.",
+                    e
+                )
+            })?;
 
             fout.write_all(&plaintext)?;
             plaintext.zeroize();
@@ -1982,7 +2162,8 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     // Sync temp file contents to disk before considering decryption successful,
     // so a crash right after this call can't leave a truncated "success" output.
     let decrypt_result = decrypt_result.and_then(|_| {
-        fout.sync_all().context("Failed to sync decrypted temp file to disk")
+        fout.sync_all()
+            .context("Failed to sync decrypted temp file to disk")
     });
 
     // Ensure file is closed before rename/delete
@@ -1995,8 +2176,9 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
                 .context("Failed to move decrypted file to final destination")?;
             temp_guard.disarm();
             output_guard.disarm();
-            sync_parent_dir(&final_output_path)
-                .context("Failed to sync directory after rename; decrypted output may not survive a crash")?;
+            sync_parent_dir(&final_output_path).context(
+                "Failed to sync directory after rename; decrypted output may not survive a crash",
+            )?;
 
             // Best-effort: restore the original file's mtime/atime if the
             // metadata region carried them. Runs after both disarms (same
@@ -2006,7 +2188,9 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
             // failure here is a warning, not a decrypt failure.
             if let Some(meta) = &decoded_metadata {
                 let restore_result = match (meta.mtime, meta.atime) {
-                    (Some(mtime), Some(atime)) => filetime::set_file_times(&final_output_path, atime, mtime),
+                    (Some(mtime), Some(atime)) => {
+                        filetime::set_file_times(&final_output_path, atime, mtime)
+                    }
                     (Some(mtime), None) => filetime::set_file_mtime(&final_output_path, mtime),
                     (None, Some(atime)) => filetime::set_file_atime(&final_output_path, atime),
                     (None, None) => Ok(()),
@@ -2067,7 +2251,10 @@ fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
     let file_len = fin.metadata()?.len();
     let body_end = body_end_len(file_len, header_end_pos, parsed.has_trailer)?;
 
-    println!("Structure OK: valid {} header", if parsed.is_v2 { "PQE2" } else { "PQE1" });
+    println!(
+        "Structure OK: valid {} header",
+        if parsed.is_v2 { "PQE2" } else { "PQE1" }
+    );
 
     if !parsed.has_trailer {
         println!("No checksum trailer present (file predates this feature, or is PQE1); skipping checksum check.");
@@ -2094,7 +2281,8 @@ fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
     let computed: [u8; 32] = hasher.finalize().into();
 
     let mut trailer = [0u8; TRAILER_SIZE];
-    fin.read_exact(&mut trailer).context("Failed to read checksum trailer")?;
+    fin.read_exact(&mut trailer)
+        .context("Failed to read checksum trailer")?;
 
     if computed == trailer {
         println!("Checksum OK: matches embedded SHA-256 trailer");
@@ -2103,7 +2291,8 @@ fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
     } else {
         bail!(
             "CHECKSUM MISMATCH: file may be corrupted or truncated\n  computed: {}\n  trailer:  {}",
-            to_hex(&computed), to_hex(&trailer)
+            to_hex(&computed),
+            to_hex(&trailer)
         );
     }
 }
@@ -2114,10 +2303,12 @@ fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
 /// for the open handle or parsed header once verification is done.
 fn verify_file(input_path: &str) -> Result<()> {
     validate_path(input_path, true, false, "Input file")?;
-    let input_meta = fs::metadata(input_path)
-        .context("Failed to read input file metadata")?;
+    let input_meta = fs::metadata(input_path).context("Failed to read input file metadata")?;
     if !input_meta.is_file() {
-        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+        bail!(
+            "Input file must be a regular file, not a directory or special file: {}",
+            input_path
+        );
     }
 
     let mut fin = File::open(input_path).context("Failed to open input file")?;

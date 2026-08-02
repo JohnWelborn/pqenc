@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TestData, TempTestEnv, TEST_PASSPHRASE};
+use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
 
@@ -19,22 +19,31 @@ fn test_full_workflow_small_file() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Decrypt
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
     assert_eq!(decrypted, input_data.plaintext);
@@ -42,7 +51,7 @@ fn test_full_workflow_small_file() {
 
 #[test]
 fn test_sha256_matches_before_encryption_and_after_decryption() {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let env = TempTestEnv::new();
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
@@ -55,25 +64,36 @@ fn test_sha256_matches_before_encryption_and_after_decryption() {
     let original_hash = Sha256::digest(&input_data.plaintext);
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted_hash = Sha256::digest(fs::read(&decrypted_path).unwrap());
 
-    assert_eq!(original_hash, decrypted_hash,
-               "SHA256 of the decrypted output must match SHA256 of the original input");
+    assert_eq!(
+        original_hash, decrypted_hash,
+        "SHA256 of the decrypted output must match SHA256 of the original input"
+    );
 }
 
 #[test]
@@ -87,10 +107,15 @@ fn test_empty_file() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -100,8 +125,9 @@ fn test_empty_file() {
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
     assert_eq!(decrypted, b"");
@@ -119,10 +145,15 @@ fn test_exactly_one_chunk() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -132,8 +163,9 @@ fn test_exactly_one_chunk() {
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
     assert_eq!(decrypted, data);
@@ -151,10 +183,15 @@ fn test_wrong_passphrase_fails() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -164,7 +201,7 @@ fn test_wrong_passphrase_fails() {
     let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        "wrong-passphrase"
+        "wrong-passphrase",
     );
 
     assert!(result.is_err());
@@ -177,10 +214,16 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
 
     let pem_text = fs::read(&priv_key).unwrap();
     let pem_text = String::from_utf8_lossy(&pem_text);
-    assert!(pem_text.contains("-----BEGIN PQENC PRIVATE KEY-----"),
-            "Private key should use the plain-text PEM header, got: {}", pem_text);
-    assert!(!pem_text.contains("ENCRYPTED"),
-            "Private key should not be marked encrypted, got: {}", pem_text);
+    assert!(
+        pem_text.contains("-----BEGIN PQENC PRIVATE KEY-----"),
+        "Private key should use the plain-text PEM header, got: {}",
+        pem_text
+    );
+    assert!(
+        !pem_text.contains("ENCRYPTED"),
+        "Private key should not be marked encrypted, got: {}",
+        pem_text
+    );
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
@@ -188,10 +231,15 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -200,15 +248,23 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     // prompt at all for a plain-text key, or this would hang/fail on a
     // closed-stdin read instead of succeeding.
     let output = Command::new(pqenc_binary())
-        .args(["decrypt",
-            "--decrypt", encrypted_path.to_str().unwrap(),
-            "--output", decrypted_path.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap()])
+        .args([
+            "decrypt",
+            "--decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+        ])
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
-    assert!(output.status.success(), "Decrypt of plain-text key failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Decrypt of plain-text key failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fs::read(&decrypted_path).unwrap(), data);
 }
 
@@ -223,10 +279,15 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -234,15 +295,24 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     // A script that always passes a passphrase variable shouldn't need to
     // special-case a plain-text key: the passphrase should just be ignored.
     let output = Command::new(pqenc_binary())
-        .args(["decrypt",
-            "--decrypt", encrypted_path.to_str().unwrap(),
-            "--output", decrypted_path.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", "some-unrelated-value"])
+        .args([
+            "decrypt",
+            "--decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            "some-unrelated-value",
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Decrypt of plain-text key failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Decrypt of plain-text key failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fs::read(&decrypted_path).unwrap(), data);
 }
 
@@ -256,10 +326,15 @@ fn test_file_format_has_magic_bytes() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -278,16 +353,27 @@ fn test_optional_output_defaults_round_trip() {
 
     // Encrypt without -o: should default to <input>.pqe
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let expected_encrypted_path = env.file_path("notes.txt.pqe");
-    assert!(expected_encrypted_path.exists(), "expected {:?} to exist", expected_encrypted_path);
+    assert!(
+        expected_encrypted_path.exists(),
+        "expected {:?} to exist",
+        expected_encrypted_path
+    );
 
     // Remove the plaintext so decrypt has to genuinely restore it, rather
     // than a coincidental leftover masking a bug.
@@ -296,17 +382,32 @@ fn test_optional_output_defaults_round_trip() {
     // Decrypt without -o: should restore the original filename, captured
     // via Path::file_name() at encrypt time, next to the .pqe file.
     let output = Command::new(pqenc_binary())
-        .args(["decrypt",
-            "--decrypt", expected_encrypted_path.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "decrypt",
+            "--decrypt",
+            expected_encrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Decryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Decryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    assert!(input_path.exists(), "expected restored file at {:?}", input_path);
-    assert_eq!(fs::read(&input_path).unwrap(), b"optional output round trip");
+    assert!(
+        input_path.exists(),
+        "expected restored file at {:?}",
+        input_path
+    );
+    assert_eq!(
+        fs::read(&input_path).unwrap(),
+        b"optional output round trip"
+    );
 }
 
 #[cfg(unix)]
@@ -324,31 +425,51 @@ fn test_decrypt_restores_original_mtime() {
 
     let encrypted_path = env.file_path("timed.bin.pqe");
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let decrypted_path = env.file_path("timed_restored.bin");
     let output = Command::new(pqenc_binary())
-        .args(["decrypt",
-            "--decrypt", encrypted_path.to_str().unwrap(),
-            "--output", decrypted_path.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "decrypt",
+            "--decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Decryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Decryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let restored_meta = fs::metadata(&decrypted_path).unwrap();
     let restored_mtime = filetime::FileTime::from_last_modification_time(&restored_meta);
-    assert_eq!(restored_mtime.unix_seconds(), distinctive.unix_seconds(),
-               "decrypted file's mtime should match the original input's mtime");
+    assert_eq!(
+        restored_mtime.unix_seconds(),
+        distinctive.unix_seconds(),
+        "decrypted file's mtime should match the original input's mtime"
+    );
 }
 
 #[test]
@@ -363,22 +484,31 @@ fn test_large_file_multiple_chunks() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Decrypt
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
     assert_eq!(decrypted, data.plaintext);
@@ -404,20 +534,29 @@ fn test_exact_multiple_of_chunk_size_with_trailer() {
     let decrypted_path = env.file_path("twochunk_dec.bin");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
 
     let decrypted = fs::read(&decrypted_path).unwrap();
     assert_eq!(decrypted, data.plaintext);
@@ -444,24 +583,37 @@ fn test_encrypt_refuses_existing_output() {
     let encrypted_path = env.create_file("occupied.enc", SENTINEL);
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(!output.status.success(),
-            "Encryption must refuse to overwrite an existing output file");
+    assert!(
+        !output.status.success(),
+        "Encryption must refuse to overwrite an existing output file"
+    );
 
     // create_new never truncates, so the original bytes must survive intact.
-    assert_eq!(fs::read(&encrypted_path).unwrap(), SENTINEL,
-               "Pre-existing output file was modified");
+    assert_eq!(
+        fs::read(&encrypted_path).unwrap(),
+        SENTINEL,
+        "Pre-existing output file was modified"
+    );
 
     // The rejection must happen before any temp file is created.
     let leftovers = temp_artifacts(encrypted_path.parent().unwrap());
-    assert!(leftovers.is_empty(),
-            "Rejected run left temp artifacts behind: {:?}", leftovers);
+    assert!(
+        leftovers.is_empty(),
+        "Rejected run left temp artifacts behind: {:?}",
+        leftovers
+    );
 }
 
 #[test]
@@ -475,28 +627,40 @@ fn test_encrypt_success_leaves_no_temp_file() {
     let decrypted_path = env.file_path("clean_dec.bin");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // A missing disarm() or a rename mistake would strand the temp file here,
     // silently accumulating one stale copy per backup run.
     let leftovers = temp_artifacts(encrypted_path.parent().unwrap());
-    assert!(leftovers.is_empty(),
-            "Successful run left temp artifacts behind: {:?}", leftovers);
+    assert!(
+        leftovers.is_empty(),
+        "Successful run left temp artifacts behind: {:?}",
+        leftovers
+    );
 
     // The renamed file must still be the real, decryptable output.
     env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         decrypted_path.to_str().unwrap(),
-        TEST_PASSPHRASE
-    ).unwrap();
+        TEST_PASSPHRASE,
+    )
+    .unwrap();
     assert_eq!(fs::read(&decrypted_path).unwrap(), data.plaintext);
 }
 
@@ -512,21 +676,33 @@ fn test_encrypted_output_permissions() {
     let encrypted_path = env.file_path("perms.enc");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // fs::rename carries the temp file's mode to the destination, so this is
     // really asserting that the temp file was created with ENCRYPT_OUTPUT_MODE.
     // 0o600 is umask-independent, which is what makes this deterministic.
     let mode = fs::metadata(&encrypted_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "Encrypted output should be owner-only, got {:o}", mode);
+    assert_eq!(
+        mode, 0o600,
+        "Encrypted output should be owner-only, got {:o}",
+        mode
+    );
 }
 
 /// Regression test for partial output on interrupted encryption.
@@ -551,10 +727,15 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     let dir = encrypted_path.parent().unwrap().to_path_buf();
 
     let mut child = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", "-",
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            "-",
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -572,9 +753,13 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     // `interrupted.enc`, the post-fix build grows a `.tmp.` sibling.
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let output_started = fs::metadata(&encrypted_path).map(|m| m.len() > 0).unwrap_or(false);
+        let output_started = fs::metadata(&encrypted_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
         let temp_started = temp_artifacts(&dir).iter().any(|name| {
-            fs::metadata(dir.join(name)).map(|m| m.len() > 0).unwrap_or(false)
+            fs::metadata(dir.join(name))
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
         });
         if output_started || temp_started {
             break;
@@ -591,33 +776,49 @@ fn test_encrypt_killed_midstream_leaves_no_partial_output() {
     // run Drop, so the 0-byte placeholder legitimately survives — but it must
     // never contain data that could be mistaken for a completed backup.
     if let Ok(meta) = fs::metadata(&encrypted_path) {
-        assert_eq!(meta.len(), 0,
-                   "Interrupted encryption left {} bytes of partial output at the destination",
-                   meta.len());
-        assert_ne!(fs::read(&encrypted_path).unwrap().get(..4), Some(&b"PQE2"[..]),
-                   "Interrupted encryption left a pqenc header at the destination");
+        assert_eq!(
+            meta.len(),
+            0,
+            "Interrupted encryption left {} bytes of partial output at the destination",
+            meta.len()
+        );
+        assert_ne!(
+            fs::read(&encrypted_path).unwrap().get(..4),
+            Some(&b"PQE2"[..]),
+            "Interrupted encryption left a pqenc header at the destination"
+        );
     }
 
     // Guard against the test passing vacuously: confirm real ciphertext was in
     // flight at kill time, and that it was accumulating at the temp path.
     let leftovers = temp_artifacts(&dir);
-    assert!(!leftovers.is_empty(),
-            "Expected an orphaned temp file after SIGKILL; encryption may not have started");
+    assert!(
+        !leftovers.is_empty(),
+        "Expected an orphaned temp file after SIGKILL; encryption may not have started"
+    );
     let temp_bytes = fs::read(dir.join(&leftovers[0])).unwrap();
-    assert_eq!(temp_bytes.get(..4), Some(&b"PQE2"[..]),
-               "Temp file should hold the real output stream");
+    assert_eq!(
+        temp_bytes.get(..4),
+        Some(&b"PQE2"[..]),
+        "Temp file should hold the real output stream"
+    );
 }
 
 /// Run `generate-keys` with stdin closed. Only for checks that must fail
 /// *before* the passphrase prompt — reaching the prompt with no stdin produces an
 /// unrelated read error, which would make a test pass for the wrong reason.
-fn run_generate_keys(pub_path: &std::path::Path, priv_path: &std::path::Path)
-    -> std::process::Output
-{
+fn run_generate_keys(
+    pub_path: &std::path::Path,
+    priv_path: &std::path::Path,
+) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(["generate-keys",
-            "--public-key", pub_path.to_str().unwrap(),
-            "--private-key", priv_path.to_str().unwrap()])
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_path.to_str().unwrap(),
+            "--private-key",
+            priv_path.to_str().unwrap(),
+        ])
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap()
@@ -631,10 +832,15 @@ fn run_generate_keys_answering_prompts(
     priv_path: &std::path::Path,
 ) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(["generate-keys",
-            "--public-key", pub_path.to_str().unwrap(),
-            "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_path.to_str().unwrap(),
+            "--private-key",
+            priv_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap()
 }
@@ -651,15 +857,31 @@ fn test_generate_keys_rejects_occupied_path_before_prompting() {
     let output = run_generate_keys(&occupied, &fresh);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    assert!(!output.status.success(), "Keygen must refuse an occupied path");
-    assert!(stderr.contains("already exists"),
-            "Error should name the conflict, got: {}", stderr);
+    assert!(
+        !output.status.success(),
+        "Keygen must refuse an occupied path"
+    );
+    assert!(
+        stderr.contains("already exists"),
+        "Error should name the conflict, got: {}",
+        stderr
+    );
     // The whole point of the advisory pre-check: fail before spending ~1-2s on
     // key generation and making the user type a passphrase twice.
-    assert!(!stderr.contains("Enter passphrase for"),
-            "Keygen prompted for a passphrase before detecting the conflict: {}", stderr);
-    assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
-    assert!(!fresh.exists(), "Nothing should have been written to the other path");
+    assert!(
+        !stderr.contains("Enter passphrase for"),
+        "Keygen prompted for a passphrase before detecting the conflict: {}",
+        stderr
+    );
+    assert_eq!(
+        fs::read(&occupied).unwrap(),
+        SENTINEL,
+        "Existing file was modified"
+    );
+    assert!(
+        !fresh.exists(),
+        "Nothing should have been written to the other path"
+    );
 
     // Occupied private key path.
     let env = TempTestEnv::new();
@@ -669,11 +891,24 @@ fn test_generate_keys_rejects_occupied_path_before_prompting() {
     let output = run_generate_keys(&fresh, &occupied);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    assert!(!output.status.success(), "Keygen must refuse an occupied path");
-    assert!(!stderr.contains("Enter passphrase for"),
-            "Keygen prompted before detecting the conflict: {}", stderr);
-    assert_eq!(fs::read(&occupied).unwrap(), SENTINEL, "Existing file was modified");
-    assert!(!fresh.exists(), "Nothing should have been written to the other path");
+    assert!(
+        !output.status.success(),
+        "Keygen must refuse an occupied path"
+    );
+    assert!(
+        !stderr.contains("Enter passphrase for"),
+        "Keygen prompted before detecting the conflict: {}",
+        stderr
+    );
+    assert_eq!(
+        fs::read(&occupied).unwrap(),
+        SENTINEL,
+        "Existing file was modified"
+    );
+    assert!(
+        !fresh.exists(),
+        "Nothing should have been written to the other path"
+    );
 }
 
 #[test]
@@ -684,13 +919,18 @@ fn test_generate_keys_rejects_identical_paths() {
     let output = run_generate_keys(&same, &same);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    assert!(!output.status.success(),
-            "Keygen must refuse to write both keys to one path");
+    assert!(
+        !output.status.success(),
+        "Keygen must refuse to write both keys to one path"
+    );
     // Assert the specific diagnosis, not merely that something failed: with no
     // stdin, reaching the passphrase prompt also fails, which would let this pass
     // for an unrelated reason.
-    assert!(stderr.contains("must differ"),
-            "Error should name the identical-path conflict, got: {}", stderr);
+    assert!(
+        stderr.contains("must differ"),
+        "Error should name the identical-path conflict, got: {}",
+        stderr
+    );
     assert!(!same.exists(), "No file should have been created");
 }
 
@@ -729,9 +969,11 @@ fn test_generate_keys_leaves_no_public_key_when_private_write_fails() {
 
     assert!(!output.status.success(), "Keygen should have failed");
     assert!(!priv_path.exists(), "Private key should not exist");
-    assert!(!pub_path.exists(),
-            "Public key was left behind after the private key write failed - \
-             it would encrypt to a private key that never existed");
+    assert!(
+        !pub_path.exists(),
+        "Public key was left behind after the private key write failed - \
+             it would encrypt to a private key that never existed"
+    );
 }
 
 #[cfg(unix)]
@@ -752,23 +994,37 @@ fn test_generate_keys_key_file_permissions() {
         .arg("-c")
         .arg(r#"umask 022; exec "$0" "$@""#)
         .arg(pqenc_binary())
-        .args(["generate-keys",
-            "--public-key", pub_path.to_str().unwrap(),
-            "--private-key", priv_path.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_path.to_str().unwrap(),
+            "--private-key",
+            priv_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Key generation failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Key generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let priv_mode = fs::metadata(&priv_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(priv_mode, 0o600,
-               "Private key should be owner-only, got {:o}", priv_mode);
+    assert_eq!(
+        priv_mode, 0o600,
+        "Private key should be owner-only, got {:o}",
+        priv_mode
+    );
 
     // Deliberately not 0600: the public key is meant to be distributed.
     let pub_mode = fs::metadata(&pub_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(pub_mode, 0o644,
-               "Public key should follow umask, got {:o}", pub_mode);
+    assert_eq!(
+        pub_mode, 0o644,
+        "Public key should follow umask, got {:o}",
+        pub_mode
+    );
 }
 
 #[test]
@@ -781,15 +1037,20 @@ fn test_generate_keys_leaves_no_temp_artifacts() {
     // staging refactor that stranded a `.tmp.` file would surface as a
     // misleading failure in the encryption tests above.
     let leftovers = temp_artifacts(pub_key.parent().unwrap());
-    assert!(leftovers.is_empty(),
-            "Key generation left temp artifacts behind: {:?}", leftovers);
+    assert!(
+        leftovers.is_empty(),
+        "Key generation left temp artifacts behind: {:?}",
+        leftovers
+    );
 }
 
 /// Extracts the "SHA256:<base64>" token from fingerprint/keygen/encrypt
 /// stdout, so tests can compare fingerprints without matching the rest of
 /// the surrounding text.
 fn extract_sha256_fingerprint(output: &str) -> &str {
-    let start = output.find("SHA256:").expect("output should contain a SHA256: fingerprint");
+    let start = output
+        .find("SHA256:")
+        .expect("output should contain a SHA256: fingerprint");
     output[start..].split_whitespace().next().unwrap()
 }
 
@@ -800,18 +1061,31 @@ fn test_generate_keys_prints_fingerprint_and_randomart() {
     let priv_key = env.file_path("priv.key");
 
     let output = Command::new(pqenc_binary())
-        .args(["generate-keys",
-            "--public-key", pub_key.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Key fingerprint is:\nSHA256:"), "stdout: {}", stdout);
-    assert!(stdout.contains("Key's randomart image is:"), "stdout: {}", stdout);
+    assert!(
+        stdout.contains("Key fingerprint is:\nSHA256:"),
+        "stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Key's randomart image is:"),
+        "stdout: {}",
+        stdout
+    );
     assert!(stdout.contains("+--[ML-KEM-1024]--+"), "stdout: {}", stdout);
     assert!(stdout.contains("+----[SHA256]-----+"), "stdout: {}", stdout);
 }
@@ -829,9 +1103,13 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let from_pub_stdout = String::from_utf8_lossy(&from_pub.stdout).into_owned();
 
     let from_priv = Command::new(pqenc_binary())
-        .args(["fingerprint",
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "fingerprint",
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap();
     assert!(from_priv.status.success());
@@ -861,9 +1139,13 @@ fn test_fingerprint_requires_exactly_one_key_source() {
 
     // Both flags supplied.
     let both = Command::new(pqenc_binary())
-        .args(["fingerprint",
-            "--public-key", pub_key.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap()])
+        .args([
+            "fingerprint",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(!both.status.success());
@@ -878,17 +1160,30 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     let encrypted_path = env.file_path("input.enc");
 
     let encrypt_output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(encrypt_output.status.success());
     let encrypt_stdout = String::from_utf8_lossy(&encrypt_output.stdout).into_owned();
 
-    assert!(encrypt_stdout.contains("Recipient key fingerprint is:"), "stdout: {}", encrypt_stdout);
-    assert!(encrypt_stdout.contains("Recipient key's randomart image is:"), "stdout: {}", encrypt_stdout);
+    assert!(
+        encrypt_stdout.contains("Recipient key fingerprint is:"),
+        "stdout: {}",
+        encrypt_stdout
+    );
+    assert!(
+        encrypt_stdout.contains("Recipient key's randomart image is:"),
+        "stdout: {}",
+        encrypt_stdout
+    );
 
     let fingerprint_output = Command::new(pqenc_binary())
         .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])

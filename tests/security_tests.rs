@@ -26,15 +26,23 @@ fn test_truncation_attack_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Truncate encrypted file
     let mut encrypted = fs::read(&encrypted_path).unwrap();
@@ -46,7 +54,7 @@ fn test_truncation_attack_detected() {
     let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSPHRASE
+        TEST_PASSPHRASE,
     );
 
     assert!(result.is_err(), "Truncation attack should be detected");
@@ -62,15 +70,23 @@ fn test_bit_flip_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Flip a bit in the middle of the ciphertext
     let mut encrypted = fs::read(&encrypted_path).unwrap();
@@ -82,7 +98,7 @@ fn test_bit_flip_detected() {
     let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSPHRASE
+        TEST_PASSPHRASE,
     );
 
     assert!(result.is_err(), "Bit flip attack should be detected");
@@ -100,15 +116,23 @@ fn test_encryption_is_nondeterministic() {
     // Encrypt twice with same data
     for enc_path in [&enc1_path, &enc2_path] {
         let output = Command::new(pqenc_binary())
-            .args(["encrypt",
-                "--encrypt", input_path.to_str().unwrap(),
-                "--output", enc_path.to_str().unwrap(),
-                "--public-key", pub_key.to_str().unwrap()])
+            .args([
+                "encrypt",
+                "--encrypt",
+                input_path.to_str().unwrap(),
+                "--output",
+                enc_path.to_str().unwrap(),
+                "--public-key",
+                pub_key.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
-        assert!(output.status.success(), "Encryption failed: {}",
-                String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let enc1 = fs::read(&enc1_path).unwrap();
@@ -129,14 +153,22 @@ fn test_encrypted_file_does_not_contain_plaintext_content() {
     let encrypted_path = env.file_path("payload.txt.pqe");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let encrypted = fs::read(&encrypted_path).unwrap();
     assert!(
@@ -157,14 +189,22 @@ fn test_encrypted_file_does_not_contain_original_filename() {
     let encrypted_path = env.file_path("out.pqe");
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let encrypted = fs::read(&encrypted_path).unwrap();
     let name_bytes = distinctive_name.as_bytes();
@@ -189,7 +229,7 @@ fn test_invalid_magic_bytes_rejected() {
     let result = env.decrypt_file_with_passphrase(
         bad_path.to_str().unwrap(),
         out_path.to_str().unwrap(),
-        TEST_PASSPHRASE
+        TEST_PASSPHRASE,
     );
 
     assert!(result.is_err(), "Invalid magic bytes should be rejected");
@@ -205,15 +245,23 @@ fn test_header_tampering_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Tamper with header (after magic bytes but before ciphertext)
     let mut encrypted = fs::read(&encrypted_path).unwrap();
@@ -226,7 +274,7 @@ fn test_header_tampering_detected() {
     let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSPHRASE
+        TEST_PASSPHRASE,
     );
 
     assert!(result.is_err(), "Header tampering should be detected");
@@ -242,15 +290,23 @@ fn test_ciphertext_tampering_detected() {
 
     // Encrypt
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Tamper with ciphertext near the end
     let mut encrypted = fs::read(&encrypted_path).unwrap();
@@ -262,7 +318,7 @@ fn test_ciphertext_tampering_detected() {
     let result = env.decrypt_file_with_passphrase(
         encrypted_path.to_str().unwrap(),
         env.file_path("out.txt").to_str().unwrap(),
-        TEST_PASSPHRASE
+        TEST_PASSPHRASE,
     );
 
     assert!(result.is_err(), "Ciphertext tampering should be detected");

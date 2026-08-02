@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TestData, TempTestEnv, TEST_PASSPHRASE};
+use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
 use proptest::prelude::*;
 use std::fs;
 use std::process::Command;

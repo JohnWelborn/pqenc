@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 pub struct TempTestEnv {
@@ -15,7 +15,11 @@ impl TempTestEnv {
         let pub_key_path = dir.path().join("test_pub.pem");
         let priv_key_path = dir.path().join("test_priv.pem");
 
-        Self { _dir: dir, pub_key_path, priv_key_path }
+        Self {
+            _dir: dir,
+            pub_key_path,
+            priv_key_path,
+        }
     }
 
     pub fn file_path(&self, name: &str) -> PathBuf {
@@ -36,15 +40,21 @@ impl TempTestEnv {
         let output = Command::new(binary)
             .args([
                 "generate-keys",
-                "--public-key", self.pub_key_path.to_str().unwrap(),
-                "--private-key", self.priv_key_path.to_str().unwrap(),
-                "--passphrase", passphrase,
+                "--public-key",
+                self.pub_key_path.to_str().unwrap(),
+                "--private-key",
+                self.priv_key_path.to_str().unwrap(),
+                "--passphrase",
+                passphrase,
             ])
             .output()
             .expect("Failed to generate keys");
 
         if !output.status.success() {
-            panic!("Key generation failed: {}", String::from_utf8_lossy(&output.stderr));
+            panic!(
+                "Key generation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         (self.pub_key_path.clone(), self.priv_key_path.clone())
@@ -54,7 +64,7 @@ impl TempTestEnv {
         &self,
         input: &str,
         output: &str,
-        passphrase: &str
+        passphrase: &str,
     ) -> Result<(), String> {
         use std::process::Command;
 
@@ -63,10 +73,14 @@ impl TempTestEnv {
         let result = Command::new(binary)
             .args([
                 "decrypt",
-                "--decrypt", input,
-                "--output", output,
-                "--private-key", self.priv_key_path.to_str().unwrap(),
-                "--passphrase", passphrase,
+                "--decrypt",
+                input,
+                "--output",
+                output,
+                "--private-key",
+                self.priv_key_path.to_str().unwrap(),
+                "--passphrase",
+                passphrase,
             ])
             .output()
             .map_err(|e| format!("Failed to run decrypt: {}", e))?;

@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-use std::hint::black_box;
-use std::process::Command;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::fs;
+use std::hint::black_box;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 const BENCH_PASSPHRASE: &str = "bench-passphrase";
@@ -25,16 +25,24 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
         let _ = fs::remove_file(&priv_key);
 
         let output = Command::new(pqenc_binary())
-            .args(["generate-keys",
-                "--public-key", pub_key.to_str().unwrap(),
-                "--private-key", priv_key.to_str().unwrap(),
-                "--passphrase", BENCH_PASSPHRASE])
+            .args([
+                "generate-keys",
+                "--public-key",
+                pub_key.to_str().unwrap(),
+                "--private-key",
+                priv_key.to_str().unwrap(),
+                "--passphrase",
+                BENCH_PASSPHRASE,
+            ])
             .output()
             .expect("Failed to generate benchmark keys");
 
         // Without this the benchmarks would silently measure a missing keypair.
-        assert!(output.status.success(), "Benchmark key generation failed: {}",
-                String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "Benchmark key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     (pub_key, priv_key)
@@ -48,7 +56,7 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
 
-    for size in [1024, 64*1024, 256*1024, 1024*1024].iter() {
+    for size in [1024, 64 * 1024, 256 * 1024, 1024 * 1024].iter() {
         let data = vec![0u8; *size];
         let input_path = temp_dir.join(format!("bench_input_{}.bin", size));
         let output_path = temp_dir.join(format!("bench_output_{}.enc", size));
@@ -60,16 +68,21 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let output = Command::new(pqenc_binary())
-                        .args(["encrypt",
-                            "--encrypt", input_path.to_str().unwrap(),
-                            "--output", output_path.to_str().unwrap(),
-                            "--public-key", pub_key.to_str().unwrap()])
+                        .args([
+                            "encrypt",
+                            "--encrypt",
+                            input_path.to_str().unwrap(),
+                            "--output",
+                            output_path.to_str().unwrap(),
+                            "--public-key",
+                            pub_key.to_str().unwrap(),
+                        ])
                         .output()
                         .unwrap();
 
                     black_box(output);
                 });
-            }
+            },
         );
     }
 
@@ -84,7 +97,7 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
 
-    for size in [1024, 64*1024, 256*1024, 1024*1024].iter() {
+    for size in [1024, 64 * 1024, 256 * 1024, 1024 * 1024].iter() {
         let data = vec![0u8; *size];
         let input_path = temp_dir.join(format!("bench_dec_input_{}.bin", size));
         let encrypted_path = temp_dir.join(format!("bench_dec_encrypted_{}.enc", size));
@@ -94,10 +107,15 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
 
         // Encrypt once
         Command::new(pqenc_binary())
-            .args(["encrypt",
-                "--encrypt", input_path.to_str().unwrap(),
-                "--output", encrypted_path.to_str().unwrap(),
-                "--public-key", pub_key.to_str().unwrap()])
+            .args([
+                "encrypt",
+                "--encrypt",
+                input_path.to_str().unwrap(),
+                "--output",
+                encrypted_path.to_str().unwrap(),
+                "--public-key",
+                pub_key.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
@@ -107,17 +125,23 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let output = Command::new(pqenc_binary())
-                        .args(["decrypt",
-                            "--decrypt", encrypted_path.to_str().unwrap(),
-                            "--output", output_path.to_str().unwrap(),
-                            "--private-key", priv_key.to_str().unwrap(),
-                            "--passphrase", BENCH_PASSPHRASE])
+                        .args([
+                            "decrypt",
+                            "--decrypt",
+                            encrypted_path.to_str().unwrap(),
+                            "--output",
+                            output_path.to_str().unwrap(),
+                            "--private-key",
+                            priv_key.to_str().unwrap(),
+                            "--passphrase",
+                            BENCH_PASSPHRASE,
+                        ])
                         .output()
                         .unwrap();
 
                     black_box(output);
                 });
-            }
+            },
         );
     }
 
@@ -137,10 +161,15 @@ fn benchmark_key_generation(c: &mut Criterion) {
             let priv_key = temp_dir.join(format!("keygen_priv_{}.pem", rand::random::<u32>()));
 
             let output = Command::new(pqenc_binary())
-                .args(["generate-keys",
-                    "--public-key", pub_key.to_str().unwrap(),
-                    "--private-key", priv_key.to_str().unwrap(),
-                    "--passphrase", BENCH_PASSPHRASE])
+                .args([
+                    "generate-keys",
+                    "--public-key",
+                    pub_key.to_str().unwrap(),
+                    "--private-key",
+                    priv_key.to_str().unwrap(),
+                    "--passphrase",
+                    BENCH_PASSPHRASE,
+                ])
                 .output()
                 .unwrap();
 
@@ -155,5 +184,10 @@ fn benchmark_key_generation(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_encryption_sizes, benchmark_decryption_sizes, benchmark_key_generation);
+criterion_group!(
+    benches,
+    benchmark_encryption_sizes,
+    benchmark_decryption_sizes,
+    benchmark_key_generation
+);
 criterion_main!(benches);

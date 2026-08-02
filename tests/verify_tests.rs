@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TestData, TempTestEnv, TEST_PASSPHRASE};
+use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
 
@@ -14,14 +14,22 @@ fn encrypt_bytes(env: &TempTestEnv, name: &str, plaintext: &[u8]) -> Vec<u8> {
     let encrypted_path = env.file_path(&format!("{name}.pqe"));
 
     let output = Command::new(pqenc_binary())
-        .args(["encrypt",
-            "--encrypt", input_path.to_str().unwrap(),
-            "--output", encrypted_path.to_str().unwrap(),
-            "--public-key", pub_key.to_str().unwrap()])
+        .args([
+            "encrypt",
+            "--encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "Encryption failed: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     fs::read(&encrypted_path).unwrap()
 }
@@ -41,10 +49,16 @@ fn test_verify_valid_file_passes() {
     fs::write(&path, &bytes).unwrap();
 
     let output = run_verify(&path);
-    assert!(output.status.success(), "verify should pass for an untampered file: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "verify should pass for an untampered file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("VALID"), "expected a VALID message, got: {stdout}");
+    assert!(
+        stdout.contains("VALID"),
+        "expected a VALID message, got: {stdout}"
+    );
 }
 
 #[test]
@@ -57,9 +71,15 @@ fn test_verify_detects_corrupted_trailer() {
     fs::write(&path, &bytes).unwrap();
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should fail on a corrupted trailer");
+    assert!(
+        !output.status.success(),
+        "verify should fail on a corrupted trailer"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("CHECKSUM MISMATCH"), "expected a checksum mismatch error, got: {stderr}");
+    assert!(
+        stderr.contains("CHECKSUM MISMATCH"),
+        "expected a checksum mismatch error, got: {stderr}"
+    );
 }
 
 #[test]
@@ -73,7 +93,10 @@ fn test_verify_detects_body_corruption() {
     fs::write(&path, &bytes).unwrap();
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should fail when the ciphertext body is corrupted");
+    assert!(
+        !output.status.success(),
+        "verify should fail when the ciphertext body is corrupted"
+    );
 }
 
 #[test]
@@ -92,9 +115,15 @@ fn test_verify_detects_header_corruption() {
     fs::write(&path, &bytes).unwrap();
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should fail when the header is corrupted");
+    assert!(
+        !output.status.success(),
+        "verify should fail when the header is corrupted"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("CHECKSUM MISMATCH"), "expected a checksum mismatch error, got: {stderr}");
+    assert!(
+        stderr.contains("CHECKSUM MISMATCH"),
+        "expected a checksum mismatch error, got: {stderr}"
+    );
 }
 
 #[test]
@@ -111,7 +140,10 @@ fn test_verify_detects_trailer_exactly_removed() {
     fs::write(&path, truncated).unwrap();
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should fail when the trailer is entirely missing but still declared present");
+    assert!(
+        !output.status.success(),
+        "verify should fail when the trailer is entirely missing but still declared present"
+    );
 }
 
 #[test]
@@ -123,7 +155,10 @@ fn test_verify_rejects_invalid_magic() {
     fs::write(&path, &bad_data).unwrap();
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should reject invalid magic bytes");
+    assert!(
+        !output.status.success(),
+        "verify should reject invalid magic bytes"
+    );
 }
 
 #[test]
@@ -132,7 +167,10 @@ fn test_verify_missing_file() {
     let path = env.file_path("does_not_exist.pqe");
 
     let output = run_verify(&path);
-    assert!(!output.status.success(), "verify should fail (not panic) on a missing file");
+    assert!(
+        !output.status.success(),
+        "verify should fail (not panic) on a missing file"
+    );
 }
 
 #[test]
@@ -150,11 +188,19 @@ fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
     let kem_ct_len = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
     let ext_len_offset = 4 + 4 + kem_ct_len + 32 + 16 + 12;
     let ext_len = u32::from_be_bytes(
-        bytes[ext_len_offset..ext_len_offset + 4].try_into().unwrap()
+        bytes[ext_len_offset..ext_len_offset + 4]
+            .try_into()
+            .unwrap(),
     ) as usize;
-    assert!(ext_len > 0, "expected a non-empty extension region carrying the trailer marker");
+    assert!(
+        ext_len > 0,
+        "expected a non-empty extension region carrying the trailer marker"
+    );
 
-    bytes.splice(ext_len_offset..ext_len_offset + 4 + ext_len, 0u32.to_be_bytes());
+    bytes.splice(
+        ext_len_offset..ext_len_offset + 4 + ext_len,
+        0u32.to_be_bytes(),
+    );
     let new_len = bytes.len() - 32;
     bytes.truncate(new_len);
 
@@ -162,21 +208,39 @@ fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
     fs::write(&path, &bytes).unwrap();
 
     let output = run_verify(&path);
-    assert!(output.status.success(), "verify should still pass structurally on a pre-trailer file: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "verify should still pass structurally on a pre-trailer file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("skipping checksum") || stdout.contains("No checksum trailer"),
-            "expected output to indicate the checksum check was skipped, not failed: {stdout}");
-    assert!(stdout.contains("VALID"), "expected a VALID message, got: {stdout}");
+    assert!(
+        stdout.contains("skipping checksum") || stdout.contains("No checksum trailer"),
+        "expected output to indicate the checksum check was skipped, not failed: {stdout}"
+    );
+    assert!(
+        stdout.contains("VALID"),
+        "expected a VALID message, got: {stdout}"
+    );
 }
 
-fn run_decrypt(input: &std::path::Path, output: &std::path::Path, priv_key: &std::path::Path) -> std::process::Output {
+fn run_decrypt(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    priv_key: &std::path::Path,
+) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(["decrypt",
-            "--decrypt", input.to_str().unwrap(),
-            "--output", output.to_str().unwrap(),
-            "--private-key", priv_key.to_str().unwrap(),
-            "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "decrypt",
+            "--decrypt",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
         .output()
         .unwrap()
 }
@@ -194,13 +258,23 @@ fn test_decrypt_runs_verify_first_and_prints_both_stages() {
     let output_path = env.file_path("data_restored.bin");
 
     let output = run_decrypt(&encrypted_path, &output_path, &priv_key);
-    assert!(output.status.success(), "decrypt should succeed on an untampered file: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "decrypt should succeed on an untampered file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let verify_pos = stdout.find("Running verify").expect("expected a 'Running verify' message");
-    let decrypt_pos = stdout.find("Decrypting").expect("expected a 'Decrypting' message");
-    assert!(verify_pos < decrypt_pos, "verify must be reported before decrypt starts: {stdout}");
+    let verify_pos = stdout
+        .find("Running verify")
+        .expect("expected a 'Running verify' message");
+    let decrypt_pos = stdout
+        .find("Decrypting")
+        .expect("expected a 'Decrypting' message");
+    assert!(
+        verify_pos < decrypt_pos,
+        "verify must be reported before decrypt starts: {stdout}"
+    );
 
     assert_eq!(fs::read(&output_path).unwrap(), b"some content to decrypt");
 }
@@ -220,11 +294,20 @@ fn test_decrypt_fails_before_decrypting_when_verify_fails() {
     let output_path = env.file_path("data_restored.bin");
 
     let output = run_decrypt(&encrypted_path, &output_path, &priv_key);
-    assert!(!output.status.success(), "decrypt should fail when the verify preflight fails");
+    assert!(
+        !output.status.success(),
+        "decrypt should fail when the verify preflight fails"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("CHECKSUM MISMATCH"), "expected a checksum mismatch error, got: {stderr}");
-    assert!(!output_path.exists(), "no output file should be created when the verify preflight fails");
+    assert!(
+        stderr.contains("CHECKSUM MISMATCH"),
+        "expected a checksum mismatch error, got: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "no output file should be created when the verify preflight fails"
+    );
 }
 
 #[test]
@@ -248,12 +331,23 @@ fn test_decrypt_rejects_occupied_output_before_running_verify() {
     let output_path = env.create_file("data_restored.bin", SENTINEL);
 
     let output = run_decrypt(&encrypted_path, &output_path, &priv_key);
-    assert!(!output.status.success(), "decrypt should refuse an occupied --output path");
+    assert!(
+        !output.status.success(),
+        "decrypt should refuse an occupied --output path"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("already exists"),
-            "expected an 'already exists' error reported before the checksum scan, got: {stderr}");
-    assert!(!stderr.contains("CHECKSUM MISMATCH"),
-            "verify's checksum preflight must not run before the output claim: {stderr}");
-    assert_eq!(fs::read(&output_path).unwrap(), SENTINEL, "pre-existing output file was modified");
+    assert!(
+        stderr.contains("already exists"),
+        "expected an 'already exists' error reported before the checksum scan, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("CHECKSUM MISMATCH"),
+        "verify's checksum preflight must not run before the output claim: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&output_path).unwrap(),
+        SENTINEL,
+        "pre-existing output file was modified"
+    );
 }
