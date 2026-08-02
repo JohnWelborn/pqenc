@@ -29,6 +29,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
 - **Key fingerprints & randomart** - `ssh-keygen`-style `SHA256:` fingerprints and ASCII-art visualization, shown at key generation and encryption time and available on demand via `pqenc fingerprint`, so a mismatched keypair can be caught by eye instead of only at restore time
 - **Metadata restoration** - the original filename, modification time, and access time are captured, encrypted, and authenticated at encrypt time, and restored automatically on decrypt when `--output` is omitted; restoration is best-effort and never fails the decrypt
+- **Corruption detection without the private key** - every encrypted file carries a SHA-256 checksum trailer over its own bytes, computed incrementally during encryption; `pqenc verify` recomputes and compares it, plus magic-byte/structural checks, with no key or passphrase, so it's safe to run unattended, e.g. in cron right after each backup. `pqenc decrypt` also runs this same check automatically, as a preflight before touching the private key, so a corrupted file is rejected with a clear error up front rather than partway through decryption. This is a plain checksum, not cryptographic authentication: it catches accidental corruption (bit rot, truncation, a bad copy), not deliberate tampering. Deliberate tampering is still caught by the AEAD tags at actual decrypt time
 
 ## Quick Start
 
@@ -121,11 +122,41 @@ Encryption refuses to overwrite an existing output file. Because output is writt
 atomically, a failed or interrupted run leaves no partial file behind, so the next
 run is not blocked by a leftover stump.
 
-### 4. Decrypt to restore (only when needed, using the private key)
+### 4. Check backup integrity without the private key (optional, cron-friendly)
+
+```bash
+pqenc verify --verify backup.tar.gz.pqe
+```
+
+Checks magic bytes and header structure, and — for files carrying a checksum
+trailer (every file `pqenc encrypt` produces) — recomputes and compares a
+SHA-256 over the whole file. Needs no private key or passphrase, so it's safe
+to run unattended, e.g. right after each backup in the same cron job that ran
+`pqenc encrypt`. Exits `0` if valid, non-zero otherwise.
+
+This is a plain checksum, not authentication: it catches accidental
+corruption (bit rot, truncation, a bad copy), not deliberate tampering —
+anyone with write access to the file can recompute it after modifying the
+file. `pqenc decrypt`'s AEAD tags are what actually protect against
+tampering, at restore time, when the private key is available.
+
+An older file with no trailer (from before this feature existed, or a `PQE1`
+file) still passes the structural checks; only the checksum comparison is
+skipped, and that's not treated as a failure.
+
+`pqenc decrypt` also runs this same check itself, automatically, before
+touching the private key — see the next step.
+
+### 5. Decrypt to restore (only when needed, using the private key)
 
 ```bash
 pqenc decrypt --private-key priv.key --decrypt backup.tar.gz.pqe --output backup.tar.gz
 ```
+
+Decrypt always verifies the file first (the same check as `pqenc verify`,
+run automatically) and aborts with a clear error before touching the private
+key or writing any output if that fails — so a corrupted file is rejected up
+front rather than partway through decryption.
 
 `--output` can be omitted: decrypt then restores the original filename (and
 modification/access times) embedded in the encrypted file, falling back to

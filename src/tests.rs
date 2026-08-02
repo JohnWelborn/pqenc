@@ -547,19 +547,17 @@
         }
     }
 
-    // Builds a real, cryptographically valid .pqe file plus a matching
-    // plain-text private key PEM, entirely from this module's own internals
-    // -- bypassing `encrypt_file`. This is what lets the tests below inject
-    // header/metadata field values `encrypt_file` itself could never
-    // produce (an unrecognized TLV field ID, or a malicious embedded
-    // filename containing ".."), which is exactly what's needed to test
-    // forward compatibility and the filename sanitizer end-to-end.
-    fn build_test_pqe_file(
+    /// Shared setup for `build_test_pqe_file`/`build_test_pqe_file_multichunk`:
+    /// generates a recipient keypair, does the KEM/DH exchange, and builds
+    /// the header (including, for PQE2, the extension and metadata regions).
+    /// Returns everything a caller needs to then encrypt a body -- one big
+    /// AEAD call, or a real multi-chunk loop -- and compute the final
+    /// `header_hash` those chunk AADs must use.
+    fn build_test_pqe_header(
         magic: &[u8],
         extension_fields: &[(u8, &[u8])],
         metadata_fields: &[(u8, &[u8])],
-        plaintext: &[u8],
-    ) -> (Vec<u8>, String) {
+    ) -> (Vec<u8>, [u8; 32], [u8; NONCE_SIZE], Aes256Gcm, String) {
         use x25519_dalek::{PublicKey as X25519PublicKey, EphemeralSecret, StaticSecret};
         use sha2::Digest;
 
@@ -634,12 +632,75 @@
 
         let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
+        (header, header_hash, base_nonce, cipher, priv_pem)
+    }
+
+    // Builds a real, cryptographically valid .pqe file plus a matching
+    // plain-text private key PEM, entirely from this module's own internals
+    // -- bypassing `encrypt_file`. This is what lets the tests below inject
+    // header/metadata field values `encrypt_file` itself could never
+    // produce (an unrecognized TLV field ID, or a malicious embedded
+    // filename containing ".."), which is exactly what's needed to test
+    // forward compatibility and the filename sanitizer end-to-end.
+    //
+    // The body is always a single AEAD call (chunk_index 0, AAD_CHUNK_TYPE_LAST),
+    // regardless of plaintext size -- fine for the small payloads these tests
+    // use, but NOT a valid stand-in for a real multi-chunk file (decrypt_file
+    // would try to split a ciphertext this large into several encrypted_chunk_size
+    // reads, each of which would fail AEAD authentication). Use
+    // `build_test_pqe_file_multichunk` for anything that needs to exercise
+    // real chunk boundaries.
+    fn build_test_pqe_file(
+        magic: &[u8],
+        extension_fields: &[(u8, &[u8])],
+        metadata_fields: &[(u8, &[u8])],
+        plaintext: &[u8],
+    ) -> (Vec<u8>, String) {
+        let (header, header_hash, base_nonce, cipher, priv_pem) =
+            build_test_pqe_header(magic, extension_fields, metadata_fields);
+
         let aad = build_aad(AAD_CHUNK_TYPE_LAST, 0, &header_hash);
         let nonce = get_nonce(&base_nonce, 0).unwrap();
         let body_ciphertext = cipher.encrypt(&nonce, Payload { msg: plaintext, aad: &aad }).unwrap();
 
         let mut file_bytes = header;
         file_bytes.extend_from_slice(&body_ciphertext);
+
+        (file_bytes, priv_pem)
+    }
+
+    /// Like `build_test_pqe_file`, but always PQE2 and chunks `plaintext`
+    /// exactly as `encrypt_file` does -- CHUNK_SIZE-sized pieces, each its
+    /// own AEAD call with the real per-chunk AAD (chunk_type/index/header_hash)
+    /// and nonce, only the final piece marked AAD_CHUNK_TYPE_LAST. Needed
+    /// because `header_hash` (and therefore every chunk's AAD) depends on
+    /// the extension region's exact bytes, so a genuinely old-format
+    /// (no-trailer-marker) multi-chunk file can't be produced by stripping
+    /// fields out of a real `pqenc encrypt` output after the fact -- that
+    /// would change header_hash out from under already-authenticated
+    /// chunks and break every tag.
+    fn build_test_pqe_file_multichunk(
+        extension_fields: &[(u8, &[u8])],
+        metadata_fields: &[(u8, &[u8])],
+        plaintext: &[u8],
+    ) -> (Vec<u8>, String) {
+        let (header, header_hash, base_nonce, cipher, priv_pem) =
+            build_test_pqe_header(MAGIC_V2, extension_fields, metadata_fields);
+
+        let mut file_bytes = header;
+        let chunks: Vec<&[u8]> = if plaintext.is_empty() {
+            vec![&[][..]]
+        } else {
+            plaintext.chunks(CHUNK_SIZE).collect()
+        };
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            let is_last = chunk_index + 1 == chunks.len();
+            let chunk_type = if is_last { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+            let aad = build_aad(chunk_type, chunk_index as u64, &header_hash);
+            let nonce = get_nonce(&base_nonce, chunk_index as u64).unwrap();
+            let ciphertext = cipher.encrypt(&nonce, Payload { msg: chunk, aad: &aad }).unwrap();
+            file_bytes.extend_from_slice(&ciphertext);
+        }
 
         (file_bytes, priv_pem)
     }
@@ -736,5 +797,151 @@
             let traversal_target = dir.path().parent().unwrap().join("evil");
             assert!(!traversal_target.exists(),
                     "path traversal target must not exist: {:?}", traversal_target);
+        }
+
+        #[test]
+        fn test_decrypt_pqe2_without_trailer_marker_succeeds() {
+            // No EXTENSION_FIELD_CHECKSUM_TRAILER field -- simulates a PQE2
+            // file written before the checksum trailer existed. Must decrypt
+            // exactly as before: body_end_len's has_trailer=false branch
+            // collapses to the raw file length, unchanged from pre-feature
+            // behavior. This is the "missing-trailer-on-old-file" backward
+            // compatibility case.
+            let dir = TempDir::new().unwrap();
+            let (file_bytes, priv_pem) = build_test_pqe_file(MAGIC_V2, &[], &[], b"pre-trailer-feature content");
+
+            let input_path = dir.path().join("old.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let output_path = dir.path().join("old_out.bin");
+            let result = decrypt_file(
+                input_path.to_str().unwrap(), Some(output_path.to_str().unwrap()),
+                priv_path.to_str().unwrap(), None,
+            );
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(fs::read(&output_path).unwrap(), b"pre-trailer-feature content");
+        }
+
+        #[test]
+        fn test_decrypt_fails_on_wrong_trailer() {
+            // Marker present, but the 32 appended bytes are deliberately
+            // wrong. decrypt now runs verify_file as a preflight before
+            // touching any key material, so this must fail there -- with a
+            // checksum-mismatch error, not a generic decrypt failure -- and
+            // never reach the AEAD chunk-decryption pass at all (no output
+            // file gets created).
+            let dir = TempDir::new().unwrap();
+            let (mut file_bytes, priv_pem) = build_test_pqe_file(
+                MAGIC_V2,
+                &[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])],
+                &[],
+                b"trailer marker present but wrong",
+            );
+            file_bytes.extend_from_slice(&[0xABu8; TRAILER_SIZE]);
+
+            let input_path = dir.path().join("wrong_trailer.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let output_path = dir.path().join("wrong_trailer_out.bin");
+            let result = decrypt_file(
+                input_path.to_str().unwrap(), Some(output_path.to_str().unwrap()),
+                priv_path.to_str().unwrap(), None,
+            );
+            let err = result.expect_err("decrypt should fail the verify preflight on a wrong trailer");
+            assert!(format!("{err:#}").contains("CHECKSUM MISMATCH"), "unexpected error: {err:#}");
+            assert!(!output_path.exists(), "no output file should be created when verify fails");
+        }
+
+        #[test]
+        fn test_decrypt_empty_plaintext_with_correct_trailer() {
+            // Sharpest instance of the "last chunk shorter than
+            // encrypted_chunk_size" landmine: body is exactly TAG_SIZE (16)
+            // bytes, so `remaining` is tiny on the very first loop
+            // iteration. A correct trailer must not get pulled into that
+            // first read.
+            use sha2::Digest;
+            let dir = TempDir::new().unwrap();
+            let (mut file_bytes, priv_pem) = build_test_pqe_file(
+                MAGIC_V2,
+                &[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])],
+                &[],
+                b"",
+            );
+            let trailer: [u8; TRAILER_SIZE] = Sha256::digest(&file_bytes).into();
+            file_bytes.extend_from_slice(&trailer);
+
+            let input_path = dir.path().join("empty_with_trailer.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let output_path = dir.path().join("empty_with_trailer_out.bin");
+            let result = decrypt_file(
+                input_path.to_str().unwrap(), Some(output_path.to_str().unwrap()),
+                priv_path.to_str().unwrap(), None,
+            );
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(fs::read(&output_path).unwrap(), b"");
+        }
+
+        #[test]
+        fn test_decrypt_multichunk_without_trailer_marker_backward_compat() {
+            // A genuinely old-format PQE2 file at multi-chunk scale: no
+            // EXTENSION_FIELD_CHECKSUM_TRAILER, several real per-chunk AEAD
+            // calls (not one big blob), last chunk not aligned to a chunk
+            // boundary. Can't be built by editing real `pqenc encrypt`
+            // output after the fact (see build_test_pqe_file_multichunk's
+            // doc comment for why), so this uses the from-scratch
+            // multi-chunk builder instead.
+            let dir = TempDir::new().unwrap();
+            let plaintext = vec![0x5Au8; (2 * CHUNK_SIZE) + 12_345]; // 2 full chunks + a short final chunk
+            let (file_bytes, priv_pem) = build_test_pqe_file_multichunk(&[], &[], &plaintext);
+
+            let input_path = dir.path().join("old_multichunk.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let output_path = dir.path().join("old_multichunk_out.bin");
+            let result = decrypt_file(
+                input_path.to_str().unwrap(), Some(output_path.to_str().unwrap()),
+                priv_path.to_str().unwrap(), None,
+            );
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(fs::read(&output_path).unwrap(), plaintext);
+        }
+
+        #[test]
+        fn test_decrypt_multichunk_with_correct_trailer() {
+            // Multi-chunk companion to test_decrypt_empty_plaintext_with_correct_trailer:
+            // several real chunks, a non-boundary-aligned final chunk, marker
+            // present, and a correctly-computed trailer appended.
+            use sha2::Digest;
+            let dir = TempDir::new().unwrap();
+            let plaintext = vec![0xA5u8; (3 * CHUNK_SIZE) + 777];
+            let (mut file_bytes, priv_pem) = build_test_pqe_file_multichunk(
+                &[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])],
+                &[],
+                &plaintext,
+            );
+            let trailer: [u8; TRAILER_SIZE] = Sha256::digest(&file_bytes).into();
+            file_bytes.extend_from_slice(&trailer);
+
+            let input_path = dir.path().join("multichunk_with_trailer.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let output_path = dir.path().join("multichunk_with_trailer_out.bin");
+            let result = decrypt_file(
+                input_path.to_str().unwrap(), Some(output_path.to_str().unwrap()),
+                priv_path.to_str().unwrap(), None,
+            );
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(fs::read(&output_path).unwrap(), plaintext);
         }
     }

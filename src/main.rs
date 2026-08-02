@@ -25,17 +25,29 @@
 //! [12 bytes: Base nonce]
 //! --- PQE2 only, below this line ---
 //! [4 bytes: cleartext extension region length]
-//! [E bytes: cleartext, header-hash-authenticated TLV fields (none defined yet;
-//!           forward-compatible: unknown field IDs are skipped by their own
-//!           length prefix, so a future field needs no further magic bump)]
+//! [E bytes: cleartext, header-hash-authenticated TLV fields. Forward-compatible:
+//!           unknown field IDs are skipped by their own length prefix, so a
+//!           future field needs no further magic bump. One field defined today:
+//!           field 0x01 (empty value) marks that a 32-byte SHA-256 checksum
+//!           trailer follows the last encrypted chunk (see below)]
 //! [4 bytes: encrypted metadata region length]
 //! [M bytes: AEAD-encrypted TLV (original filename, mtime, atime), under a
 //!           key domain-separated from the body key]
 //! [Encrypted chunks with 16-byte authentication tags]
+//! [32 bytes: optional SHA-256 checksum trailer, present iff extension field
+//!           0x01 above is present. Covers every preceding byte of the file
+//!           (header through the last chunk) but not itself, computed
+//!           incrementally during encryption. Not part of the AEAD scheme and
+//!           not authenticated -- a plain checksum for detecting accidental
+//!           corruption (bit rot, truncation, a bad copy) without the private
+//!           key, via `pqenc verify`. Gives no protection against deliberate
+//!           tampering, which the AEAD tags above already catch at decrypt time]
 //! ```
 //! `pqenc decrypt` accepts both `PQE1` and `PQE2`; `pqenc encrypt` always
-//! writes `PQE2`. `PQE1` files simply lack the two regions above -- not
-//! present-but-empty, absent from the byte stream entirely.
+//! writes `PQE2` and always appends the checksum trailer. `PQE1` files, and
+//! `PQE2` files written before this trailer existed, simply lack it -- absent
+//! from the byte stream entirely, not present-but-empty; both `pqenc decrypt`
+//! and `pqenc verify` tolerate its absence.
 //!
 //! # Accepted Risks
 //! - AES-GCM integrity guarantees degrade beyond ~64 GiB per file due to birthday-bound
@@ -54,7 +66,7 @@ use libcrux_ml_kem::mlkem1024;
 use rand::Rng;
 use sha2::Sha256;
 use std::fs::{self, File};
-use std::io::{Read, Write, Seek};
+use std::io::{Read, Write};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use base64::prelude::*;
 
@@ -65,6 +77,9 @@ const SALT_SIZE: usize = 16;
 const CHUNK_SIZE: usize = 64 * 1024;
 const TAG_SIZE: usize = 16;
 const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
+// Size of the optional SHA-256 checksum trailer appended after the last
+// encrypted chunk -- see EXTENSION_FIELD_CHECKSUM_TRAILER below.
+const TRAILER_SIZE: usize = 32;
 const MAGIC_V1: &[u8] = b"PQE1";
 const MAGIC_V2: &[u8] = b"PQE2";
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
@@ -89,6 +104,13 @@ const AAD_CHUNK_TYPE_METADATA: u8 = 0x02;
 const METADATA_FIELD_FILENAME: u8 = 0x01;
 const METADATA_FIELD_MTIME: u8 = 0x02;
 const METADATA_FIELD_ATIME: u8 = 0x03;
+
+// Cleartext extension TLV field IDs (PQE2 extension region only) -- a
+// separate namespace from the metadata-region field IDs above, since they're
+// different regions. Presence of this field (value must be empty) means a
+// 32-byte SHA-256 checksum trailer (TRAILER_SIZE) follows the last encrypted
+// chunk -- see the "# File Format" doc comment above and `pqenc verify`.
+const EXTENSION_FIELD_CHECKSUM_TRAILER: u8 = 0x01;
 
 /// 8-byte BE i64 Unix seconds + 4-byte BE u32 nanoseconds -- matches
 /// filetime::FileTime's own (seconds, nanoseconds) representation exactly,
@@ -164,6 +186,9 @@ Examples:
   # Non-interactive (e.g. scripts, CI): pass the passphrase directly
   pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
 
+  # Check a file's structure and checksum without the private key (cron-friendly)
+  pqenc verify --verify secret.enc
+
   # Generate a keypair with no passphrase (e.g. disk already encrypted)
   pqenc generate-keys --public-key pub.key --private-key priv.key --passphrase \"\"
 
@@ -208,6 +233,10 @@ enum Commands {
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
             Not needed for a plain-text private key; if supplied, it is ignored.")]
         passphrase: Option<String>,
+    },
+    Verify {
+        #[arg(long = "verify", short = 'i', help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
+        input: String,
     },
     Fingerprint {
         #[command(flatten)]
@@ -736,6 +765,9 @@ fn run() -> Result<()> {
         }
         Commands::Decrypt { input, output, private_key, passphrase } => {
             decrypt_file(&input, output.as_deref(), &private_key, passphrase)?;
+        }
+        Commands::Verify { input } => {
+            verify_file(&input)?;
         }
         Commands::Fingerprint { key_source, passphrase } => {
             show_fingerprint(key_source.public_key, key_source.private_key, passphrase)?;
@@ -1392,10 +1424,11 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // the metadata region, so it can't be computed until after this point.
     let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
 
-    // Cleartext extension region: unused (0 fields) today, but structurally
-    // present so a future field (e.g. a header-embedded recipient
-    // fingerprint) can be added without another magic-byte bump.
-    let extension_region = encode_tlv_fields(&[]);
+    // Cleartext extension region: marks that a SHA-256 checksum trailer
+    // follows the last chunk (see below). Structurally present for other
+    // future fields too (e.g. a header-embedded recipient fingerprint),
+    // which can be added without another magic-byte bump.
+    let extension_region = encode_tlv_fields(&[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])]);
     header.extend_from_slice(&(extension_region.len() as u32).to_be_bytes());
     header.extend_from_slice(&extension_region);
 
@@ -1419,6 +1452,15 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     // Write header to file
     fout.write_all(&header)?;
 
+    // Accumulates a SHA-256 over every byte written to fout (header + every
+    // chunk's ciphertext), incrementally as it's written -- the whole point
+    // is to never buffer the full file just to hash it. Finalized into the
+    // trailer once the chunk loop below ends. Orthogonal to the AEAD scheme
+    // above: a plain, unauthenticated checksum for detecting accidental
+    // corruption without the private key (see `pqenc verify`), not part of
+    // chunk authentication.
+    let mut trailer_hasher = Sha256::new();
+    trailer_hasher.update(&header);
 
     let mut chunk_index = 0;
 
@@ -1460,6 +1502,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         fout.write_all(&ciphertext)?;
+        trailer_hasher.update(&ciphertext);
 
         chunk_index += 1;
 
@@ -1474,6 +1517,9 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
         std::mem::swap(&mut current_chunk, &mut next_chunk);
         n_current = n_next;
     }
+
+    let trailer: [u8; TRAILER_SIZE] = trailer_hasher.finalize().into();
+    fout.write_all(&trailer)?;
 
     fout.sync_all().context("Failed to sync output file to disk")?;
     // Close before rename: required on Windows, and it guarantees the fd is gone
@@ -1510,67 +1556,33 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
     Ok(())
 }
 
-/// Decrypts a file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
+/// Result of `parse_header`: everything decrypt_file/verify_file need from
+/// the structural-only (no key material required) part of a PQE1/PQE2 file.
+struct ParsedHeader {
+    is_v2: bool,
+    header_bytes: Vec<u8>,
+    header_hash: [u8; 32],
+    prefix_hash: [u8; 32],
+    ciphertext_kem: Vec<u8>,
+    ephemeral_x25519_pk: [u8; 32],
+    salt: [u8; SALT_SIZE],
+    base_nonce: [u8; NONCE_SIZE],
+    metadata_ciphertext: Vec<u8>,
+    has_trailer: bool,
+}
+
+/// Parses and structurally validates a PQE1/PQE2 header: magic bytes,
+/// length-prefixed fields, and (PQE2 only) the cleartext extension region
+/// and encrypted metadata region -- every check that doesn't require the
+/// private key. Shared by `decrypt_file` and `verify_file` so this logic
+/// (including the bounds checks on attacker-controlled length prefixes)
+/// has exactly one implementation instead of two that can drift apart.
 ///
-/// Performs hybrid post-quantum decryption:
-/// 1. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
-///    and, for PQE2, the cleartext extension and encrypted metadata regions)
-/// 2. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
-///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
-/// 3. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
-/// 4. Performs X25519 key exchange with ephemeral public key
-/// 5. Combines secrets and derives the AES-256 key using HKDF-SHA256
-/// 6. For PQE2, decrypts and parses the metadata region (original filename, mtime, atime)
-/// 7. Resolves the output path -- the given `output_path`, or, if omitted, a
-///    sanitized embedded filename, or a `.pqe`-stripped fallback
-/// 8. Decrypts chunks using AES-256-GCM, verifying authentication tags
-/// 9. Deletes partial output and returns error if integrity check fails
-/// 10. Best-effort restores mtime/atime from the metadata region, if present
-///
-/// # Arguments
-/// * `input_path` - Path to encrypted file
-/// * `output_path` - Path where decrypted file will be written, or `None` to derive
-///   one from embedded metadata or the input filename (see `resolve_decrypt_output`)
-/// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
-/// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
-///
-/// # Returns
-/// * `Ok(())` on success
-/// * `Err` if validation fails, wrong key, corrupted file, or authentication fails
-fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
-    use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+/// Leaves `fin` positioned immediately after the header, at the start of
+/// the encrypted chunk body.
+fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
+    use sha2::Digest;
 
-    // Validate all paths (stdin not supported for decryption - requires seekable input)
-    validate_path(input_path, true, false, "Input file")?;
-    validate_path(private_key_path, true, false, "Private key")?;
-    let input_meta = fs::metadata(input_path)
-        .context("Failed to read input file metadata")?;
-    if !input_meta.is_file() {
-        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
-    }
-
-    // If -o was given, claim it immediately (fail-fast, matches prior
-    // behavior: using create_new(true) anchors on a file descriptor rather
-    // than checking existence separately, eliminating the check-then-rename
-    // TOCTOU window). If omitted, claiming is deferred until the
-    // metadata-derived default is known (see below), since that requires
-    // decrypting the metadata region, which requires the private key.
-    let early_claim: Option<(String, TempFileGuard, TempFileGuard)> = match output_path {
-        Some(o) => {
-            validate_path(o, false, false, "Output file")?;
-            let (og, tg) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
-            Some((o.to_string(), og, tg))
-        }
-        None => None,
-    };
-
-    // Read and decrypt (or, for a plain-text key, simply decode) the private key
-    let composite_priv = load_private_key(private_key_path, passphrase)?;
-    let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
-
-    let mut fin = File::open(input_path).context("Failed to open input file")?;
-
-    // Read and parse header
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
     let is_v2 = if magic == MAGIC_V1 {
@@ -1610,14 +1622,13 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     header.extend_from_slice(&salt);
     header.extend_from_slice(&base_nonce);
 
-    use sha2::Digest;
-
     // prefix_hash is the AAD for the metadata region's AEAD call (see
     // build_metadata_aad); computed here, before the metadata region (if
     // any) is read, exactly mirroring how encrypt_file computes it.
     let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
 
     let mut metadata_ciphertext: Vec<u8> = Vec::new();
+    let mut has_trailer = false;
     if is_v2 {
         let mut ext_len_bytes = [0u8; 4];
         fin.read_exact(&mut ext_len_bytes)?;
@@ -1627,9 +1638,20 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
         }
         let mut extension_region = vec![0u8; ext_len];
         fin.read_exact(&mut extension_region)?;
-        // Structural validation only -- no fields are defined yet, and an
-        // unrecognized one (from a future encoder) would not be an error.
-        parse_tlv_fields(&extension_region)?;
+        // Structural validation, plus picking out the one field this version
+        // recognizes -- an unrecognized field ID is never an error (forward
+        // compatibility), but a recognized field with an unexpected value
+        // shape is, matching decode_timestamp's convention for the metadata
+        // region.
+        let ext_fields = parse_tlv_fields(&extension_region)?;
+        for &(field_id, value) in &ext_fields {
+            if field_id == EXTENSION_FIELD_CHECKSUM_TRAILER {
+                if !value.is_empty() {
+                    bail!("Invalid checksum trailer marker: expected an empty value, got {} bytes", value.len());
+                }
+                has_trailer = true;
+            }
+        }
 
         let mut meta_len_bytes = [0u8; 4];
         fin.read_exact(&mut meta_len_bytes)?;
@@ -1650,12 +1672,128 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     // including the two PQE2 regions above when present)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
-    // Validate file contains encrypted data beyond the header
-    let header_end_pos = fin.stream_position()?;
-    let file_len = fin.metadata()?.len();
-    if file_len < header_end_pos + TAG_SIZE as u64 {
+    Ok(ParsedHeader {
+        is_v2,
+        header_bytes: header,
+        header_hash,
+        prefix_hash,
+        ciphertext_kem,
+        ephemeral_x25519_pk,
+        salt,
+        base_nonce,
+        metadata_ciphertext,
+        has_trailer,
+    })
+}
+
+/// Computes the length of the file's encrypted chunk body -- everything up
+/// to (but not including) the optional checksum trailer -- from the raw
+/// on-disk file length and the trailer marker parsed from the header, and
+/// sanity-checks it against the header size. Shared by decrypt_file and
+/// verify_file so this security-relevant arithmetic has exactly one
+/// implementation: get this wrong and either the last chunk gets
+/// misidentified, or -- more dangerously -- trailer bytes get fed into AEAD
+/// decryption as if they were still ciphertext.
+///
+/// When `has_trailer` is false, `body_end == file_len` -- byte-for-byte what
+/// decrypt_file computed before the checksum trailer existed, which is what
+/// keeps decryption of older, trailer-less files unchanged.
+fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result<u64> {
+    let body_end = if has_trailer {
+        file_len.checked_sub(TRAILER_SIZE as u64)
+            .ok_or_else(|| anyhow::anyhow!("Invalid file: too short to contain the declared checksum trailer"))?
+    } else {
+        file_len
+    };
+    if body_end < header_end_pos + TAG_SIZE as u64 {
         bail!("Invalid ciphertext: file too short. This may indicate file truncation or corruption.");
     }
+    Ok(body_end)
+}
+
+/// Decrypts a file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
+///
+/// Performs hybrid post-quantum decryption:
+/// 1. Runs `verify_file` as a preflight -- structure and, if present, the
+///    checksum trailer -- before touching the private key at all, so
+///    accidental corruption is reported clearly and cheaply rather than
+///    partway through the slower chunk-by-chunk AEAD pass
+/// 2. Reads and validates file header (magic bytes, KEM ciphertext, X25519 public key, salt, nonce,
+///    and, for PQE2, the cleartext extension and encrypted metadata regions)
+/// 3. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
+///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
+/// 4. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
+/// 5. Performs X25519 key exchange with ephemeral public key
+/// 6. Combines secrets and derives the AES-256 key using HKDF-SHA256
+/// 7. For PQE2, decrypts and parses the metadata region (original filename, mtime, atime)
+/// 8. Resolves the output path -- the given `output_path`, or, if omitted, a
+///    sanitized embedded filename, or a `.pqe`-stripped fallback
+/// 9. Decrypts chunks using AES-256-GCM, verifying authentication tags
+/// 10. Deletes partial output and returns error if integrity check fails
+/// 11. Best-effort restores mtime/atime from the metadata region, if present
+///
+/// # Arguments
+/// * `input_path` - Path to encrypted file
+/// * `output_path` - Path where decrypted file will be written, or `None` to derive
+///   one from embedded metadata or the input filename (see `resolve_decrypt_output`)
+/// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
+/// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err` if verification fails, validation fails, wrong key, corrupted file, or authentication fails
+fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &str, passphrase: Option<String>) -> Result<()> {
+    use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+    // Validate all paths (stdin not supported for decryption - requires seekable input)
+    validate_path(input_path, true, false, "Input file")?;
+    validate_path(private_key_path, true, false, "Private key")?;
+    let input_meta = fs::metadata(input_path)
+        .context("Failed to read input file metadata")?;
+    if !input_meta.is_file() {
+        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+    }
+
+    // Preflight: verify structure and (if present) the checksum trailer
+    // before doing any key-dependent work -- catches accidental corruption
+    // with a clear error before spending time on the private key (which may
+    // mean an interactive passphrase prompt) or the chunk-by-chunk AEAD pass.
+    println!("Running verify...");
+    verify_file(input_path).context("Verification failed; aborting decrypt")?;
+    println!("Verify passed. Decrypting...");
+
+    // If -o was given, claim it immediately (fail-fast, matches prior
+    // behavior: using create_new(true) anchors on a file descriptor rather
+    // than checking existence separately, eliminating the check-then-rename
+    // TOCTOU window). If omitted, claiming is deferred until the
+    // metadata-derived default is known (see below), since that requires
+    // decrypting the metadata region, which requires the private key.
+    let early_claim: Option<(String, TempFileGuard, TempFileGuard)> = match output_path {
+        Some(o) => {
+            validate_path(o, false, false, "Output file")?;
+            let (og, tg) = claim_output_and_temp(o, "Output file already exists or cannot be created")?;
+            Some((o.to_string(), og, tg))
+        }
+        None => None,
+    };
+
+    // Read and decrypt (or, for a plain-text key, simply decode) the private key
+    let composite_priv = load_private_key(private_key_path, passphrase)?;
+    let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
+
+    let mut fin = File::open(input_path).context("Failed to open input file")?;
+
+    let parsed = parse_header(&mut fin)?;
+    let header_end_pos = parsed.header_bytes.len() as u64;
+    let ParsedHeader {
+        is_v2, header_hash, prefix_hash, ciphertext_kem, ephemeral_x25519_pk,
+        salt, base_nonce, metadata_ciphertext, has_trailer, ..
+    } = parsed;
+
+    // Validate file contains encrypted data beyond the header, accounting
+    // for the optional trailer (see body_end_len's doc comment).
+    let file_len = fin.metadata()?.len();
+    let body_end = body_end_len(file_len, header_end_pos, has_trailer)?;
 
     // ML-KEM decapsulation
     // Deserialize private key (3168 bytes for ML-KEM-1024)
@@ -1749,16 +1887,25 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
         let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
         let mut chunk_index = 0;
 
-        let file_len = fin.metadata()
-            .context("Failed to get file metadata - decryption requires a seekable input file, not stdin or a pipe")?
-            .len();
+        // Running position, bounded by body_end (computed above from the
+        // header's trailer marker) rather than the raw file length -- this
+        // is what keeps a trailer's bytes from ever being read as if they
+        // were still ciphertext. Tracked locally instead of re-querying
+        // fin.stream_position() each iteration.
+        let mut body_pos = header_end_pos;
 
         loop {
-            // Read up to encrypted_chunk_size.
+            let remaining = body_end.saturating_sub(body_pos);
+            if remaining == 0 {
+                break;
+            }
+            let read_target = std::cmp::min(encrypted_chunk_size as u64, remaining) as usize;
+
+            // Read up to read_target.
             // We loop to ensure we fill the buffer if possible, though for local files read() usually suffices.
-            let mut buffer = vec![0u8; encrypted_chunk_size];
+            let mut buffer = vec![0u8; read_target];
             let mut bytes_read = 0;
-            while bytes_read < encrypted_chunk_size {
+            while bytes_read < read_target {
                 let n = fin.read(&mut buffer[bytes_read..])?;
                 if n == 0 {
                     break;
@@ -1766,13 +1913,12 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
                 bytes_read += n;
             }
 
-
             if bytes_read == 0 {
                 break;
             }
+            body_pos += bytes_read as u64;
 
-            let current_pos = fin.stream_position()?;
-            let chunk_type = if current_pos == file_len { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
+            let chunk_type = if body_pos == body_end { AAD_CHUNK_TYPE_LAST } else { AAD_CHUNK_TYPE_NORMAL };
             let aad = build_aad(chunk_type, chunk_index, &header_hash);
 
             let nonce = get_nonce(&base_nonce, chunk_index)?;
@@ -1840,6 +1986,86 @@ fn decrypt_file(input_path: &str, output_path: Option<&str>, private_key_path: &
     }
 }
 
+/// Checks a PQE1/PQE2 file's magic bytes and header structure, and, if the
+/// header's extension region marks a checksum trailer as present,
+/// recomputes a SHA-256 over the whole file (minus the trailer itself) and
+/// compares it. Needs no private key or passphrase, so it can run
+/// unattended (e.g. in cron, right after a backup) as the standalone
+/// `pqenc verify` command -- and `decrypt_file` also calls this directly as
+/// a preflight before touching any key material, so a corrupted file is
+/// rejected clearly and cheaply rather than partway through the AEAD pass.
+///
+/// This is a plain, unauthenticated checksum, not cryptographic
+/// authentication: it catches accidental corruption (bit rot, truncation, a
+/// bad copy), not deliberate tampering -- anyone with write access to the
+/// file can recompute it after modifying the file. Deliberate tampering is
+/// still caught by the AEAD tags at actual decrypt time.
+///
+/// A file with no trailer (an older PQE2 file predating this feature, or a
+/// PQE1 file) still gets the structural checks; the checksum comparison is
+/// simply skipped, and that's not itself a failure.
+///
+/// # Returns
+/// * `Ok(())` if the file is structurally valid (and its checksum matches, when present)
+/// * `Err` otherwise -- callers (main) translate this into a non-zero exit code
+fn verify_file(input_path: &str) -> Result<()> {
+    validate_path(input_path, true, false, "Input file")?;
+    let input_meta = fs::metadata(input_path)
+        .context("Failed to read input file metadata")?;
+    if !input_meta.is_file() {
+        bail!("Input file must be a regular file, not a directory or special file: {}", input_path);
+    }
+
+    let mut fin = File::open(input_path).context("Failed to open input file")?;
+    let parsed = parse_header(&mut fin)?;
+    let header_end_pos = parsed.header_bytes.len() as u64;
+    let file_len = fin.metadata()?.len();
+    let body_end = body_end_len(file_len, header_end_pos, parsed.has_trailer)?;
+
+    println!("Structure OK: valid {} header", if parsed.is_v2 { "PQE2" } else { "PQE1" });
+
+    if !parsed.has_trailer {
+        println!("No checksum trailer present (file predates this feature, or is PQE1); skipping checksum check.");
+        println!("VALID (structure only): {}", input_path);
+        return Ok(());
+    }
+
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(&parsed.header_bytes);
+
+    // Read forward from wherever parse_header left `fin` positioned (right
+    // after the header) -- the header itself is already hashed from memory
+    // above, so there's no need to seek back to the start of the file.
+    let mut remaining = body_end - header_end_pos;
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    while remaining > 0 {
+        let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+        fin.read_exact(&mut buf[..to_read])
+            .context("Failed to read file while recomputing checksum")?;
+        hasher.update(&buf[..to_read]);
+        remaining -= to_read as u64;
+    }
+    let computed: [u8; 32] = hasher.finalize().into();
+
+    let mut trailer = [0u8; TRAILER_SIZE];
+    fin.read_exact(&mut trailer).context("Failed to read checksum trailer")?;
+
+    if computed == trailer {
+        println!("Checksum OK: matches embedded SHA-256 trailer");
+        println!("VALID: {}", input_path);
+        Ok(())
+    } else {
+        bail!(
+            "CHECKSUM MISMATCH: file may be corrupted or truncated\n  computed: {}\n  trailer:  {}",
+            to_hex(&computed), to_hex(&trailer)
+        );
+    }
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 #[cfg(test)]
 mod tests;

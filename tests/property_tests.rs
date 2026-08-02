@@ -48,6 +48,15 @@ proptest! {
     }
 }
 
+// Since `pqenc encrypt` always appends a checksum trailer now, every
+// round trip below through the real CLI also doubles as regression coverage
+// for decrypt_file's trailer-aware body-length math: test_chunk_boundaries
+// exercises sizes that are exact multiples of CHUNK_SIZE (the "last chunk is
+// exactly encrypted_chunk_size" case), and test_near_chunk_boundaries
+// exercises sizes just past a boundary (the "last chunk is shorter than
+// encrypted_chunk_size" case, the more common one). See
+// tests/integration_tests.rs for a dedicated, non-random test pinned to
+// exactly 2*CHUNK_SIZE for the same reason with an easier-to-debug failure.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
 

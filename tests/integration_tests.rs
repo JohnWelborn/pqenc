@@ -384,6 +384,45 @@ fn test_large_file_multiple_chunks() {
     assert_eq!(decrypted, data.plaintext);
 }
 
+#[test]
+fn test_exact_multiple_of_chunk_size_with_trailer() {
+    // Dedicated, non-random regression test (as opposed to
+    // property_tests.rs's randomized chunk-count tests) for the checksum
+    // trailer's trickiest interaction with chunking: when the input size is
+    // an exact multiple of CHUNK_SIZE, the true last chunk's ciphertext is
+    // exactly CHUNK_SIZE+TAG_SIZE bytes, so decrypt's read of that chunk
+    // must stop precisely at the trailer boundary without either
+    // over-reading into the trailer or misclassifying the last chunk as
+    // AAD_CHUNK_TYPE_NORMAL because the trailer shifted the raw file length.
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let chunk_size = 64 * 1024;
+    let data = TestData::random(2 * chunk_size);
+    let input_path = env.create_file("twochunk.bin", &data.plaintext);
+    let encrypted_path = env.file_path("twochunk.enc");
+    let decrypted_path = env.file_path("twochunk_dec.bin");
+
+    let output = Command::new(pqenc_binary())
+        .args(&["encrypt",
+            "--encrypt", input_path.to_str().unwrap(),
+            "--output", encrypted_path.to_str().unwrap(),
+            "--public-key", pub_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Encryption failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE
+    ).unwrap();
+
+    let decrypted = fs::read(&decrypted_path).unwrap();
+    assert_eq!(decrypted, data.plaintext);
+}
+
 /// Names of leftover atomic-write temp files (`<output>.tmp.<hex>`) in `dir`.
 fn temp_artifacts(dir: &std::path::Path) -> Vec<String> {
     fs::read_dir(dir)
