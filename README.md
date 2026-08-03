@@ -185,7 +185,7 @@ If preferred, decryption can be performed on an offline or air-gapped machine by
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust 1.95 or later
 - No system dependencies required — all cryptographic primitives are pure Rust crates
 
 ### Build Commands
