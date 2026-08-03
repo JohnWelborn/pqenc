@@ -95,7 +95,7 @@ fn test_encrypt_directory_via_tar_command() {
     let mut magic = [0u8; 4];
     let mut file = fs::File::open(&encrypted_path).unwrap();
     file.read_exact(&mut magic).unwrap();
-    assert_eq!(&magic, b"PQE2");
+    assert_eq!(&magic, b"PQE3");
     drop(file);
 
     // Decrypt: pqenc decrypt | tar xzf -

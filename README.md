@@ -23,6 +23,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 - **ML-KEM-1024** (NIST FIPS 203) - Post-quantum key encapsulation mechanism
 - **X25519** - Hybrid classical key exchange for defense in depth
 - **AES-256-GCM** - Authenticated encryption with additional data
+- **Segmented rekeying (PQE3)** - the current format `pqenc encrypt` writes divides plaintext into fixed 8 GiB segments, each independently keyed via HKDF-SHA256, so no single AES-256-GCM key ever encrypts more than 8 GiB regardless of total file size
 - **Formally verified** - Uses libcrux, a formally verified cryptography library
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
@@ -128,6 +129,14 @@ works. A hard kill (e.g. `SIGKILL`) or power loss can't run that cleanup and
 may leave the placeholder behind, but pqenc recognizes its own placeholders
 and safely reclaims them on the next attempt to the same path, so retries are
 not permanently blocked.
+
+`pqenc encrypt` always writes the current file format, `PQE3`: plaintext is
+divided into fixed 8 GiB segments, each encrypted under its own independently
+HKDF-derived AES-256-GCM key, so no single key ever encrypts more than 8 GiB
+even for very large backups. `pqenc decrypt` and `pqenc verify` also still
+read the older `PQE1` and `PQE2` formats (one AES-256-GCM key per file)
+exactly as before, for files encrypted by earlier versions of pqenc -- there
+is no need to re-encrypt existing backups.
 
 ### 4. Check backup integrity without the private key (optional, cron-friendly)
 

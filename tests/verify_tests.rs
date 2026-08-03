@@ -175,7 +175,8 @@ fn test_verify_missing_file() {
 
 #[test]
 fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
-    // Simulates a PQE2 file encrypted before the checksum trailer existed:
+    // Simulates a file encrypted before the checksum trailer existed
+    // (a pre-trailer PQE2, or -- same header shape -- a pre-trailer PQE3):
     // real `pqenc encrypt` output, with the extension-region trailer marker
     // and the 32-byte trailer surgically stripped back out. Unlike a
     // decrypt test, this is valid input for `verify` -- verify never does

@@ -350,7 +350,7 @@ fn test_file_format_has_magic_bytes() {
     assert!(output.status.success());
 
     let encrypted = fs::read(&encrypted_path).unwrap();
-    assert_eq!(&encrypted[..4], b"PQE2");
+    assert_eq!(&encrypted[..4], b"PQE3");
 }
 
 #[test]
@@ -807,7 +807,7 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
     let temp_bytes = fs::read(dir.join(&leftovers[0])).unwrap();
     assert_eq!(
         temp_bytes.get(..4),
-        Some(&b"PQE2"[..]),
+        Some(&b"PQE3"[..]),
         "Temp file should hold the real output stream"
     );
 

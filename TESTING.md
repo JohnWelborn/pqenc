@@ -67,6 +67,17 @@ Tests internal utility functions and crypto operations:
 - PQE2 file format parsing and decrypt behavior
 - Output-path claim / temp-file guard ordering
 - Stale reservation-placeholder reclaim logic
+- PQE3 per-segment body key derivation: different segment indices derive
+  different keys, the same index derives deterministically, and domain
+  separation from PQE1/PQE2's whole-file key
+- PQE3 body-chunk AAD: differs across segment index and local chunk index,
+  and is a distinct byte length from PQE1/PQE2's and the metadata region's AAD
+- PQE3 segment/local-chunk-index boundary arithmetic, including at the real
+  8 GiB segment size
+- PQE3 round trips (empty, single-chunk, multi-chunk single-segment, and a
+  multi-segment transition exercised via a small test-only segment size) and
+  tampering detection (cross-segment chunk swap, corrupted final tag,
+  truncation, corrupted checksum trailer)
 
 ### Integration Tests (`tests/integration_tests.rs`)
 Tests full encrypt/decrypt workflows via the CLI:

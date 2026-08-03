@@ -1298,3 +1298,536 @@ mod reservation_reclaim_tests {
         assert_eq!(fs::read(&target_path).unwrap(), RESERVATION_MARKER);
     }
 }
+
+// PQE3 per-segment body key derivation tests.
+mod pqe3_body_key_tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_body_key_v3_different_segments_differ() {
+        let secret = vec![0x42; SHARED_SECRET_SIZE];
+        let salt = [0x33; SALT_SIZE];
+
+        let key0 = derive_body_key_v3(&secret, &salt, 0).unwrap();
+        let key1 = derive_body_key_v3(&secret, &salt, 1).unwrap();
+
+        assert_ne!(key0.data, key1.data);
+    }
+
+    #[test]
+    fn test_derive_body_key_v3_deterministic() {
+        let secret = vec![0x42; SHARED_SECRET_SIZE];
+        let salt = [0x33; SALT_SIZE];
+
+        let key_a = derive_body_key_v3(&secret, &salt, 7).unwrap();
+        let key_b = derive_body_key_v3(&secret, &salt, 7).unwrap();
+
+        assert_eq!(key_a.data, key_b.data);
+    }
+
+    #[test]
+    fn test_derive_body_key_v3_differs_from_pqe2_aes_key() {
+        // Domain separation between PQE3's per-segment key info string and
+        // PQE1/PQE2's whole-file AES_KEY_INFO -- guards against ever
+        // deriving colliding keys for the same combined_secret/salt.
+        let secret = vec![0x42; SHARED_SECRET_SIZE];
+        let salt = [0x33; SALT_SIZE];
+
+        let v3_segment0_key = derive_body_key_v3(&secret, &salt, 0).unwrap();
+        let v2_key = derive_aes_key(&secret, &salt).unwrap();
+
+        assert_ne!(
+            v3_segment0_key.data, v2_key.data,
+            "PQE3 segment 0's key must not collide with PQE1/PQE2's whole-file key"
+        );
+    }
+
+    #[test]
+    fn test_derive_body_key_v3_invalid_secret_size() {
+        let short = vec![0x42; 32];
+        let salt = [0x33; SALT_SIZE];
+
+        assert!(derive_body_key_v3(&short, &salt, 0).is_err());
+    }
+
+    #[test]
+    fn test_derive_body_key_v3_output_size() {
+        let secret = vec![0x42; SHARED_SECRET_SIZE];
+        let salt = [0x33; SALT_SIZE];
+
+        let key = derive_body_key_v3(&secret, &salt, 0).unwrap();
+        assert_eq!(key.data.len(), AES_KEY_SIZE);
+    }
+
+    #[test]
+    fn test_get_nonce_same_bytes_across_segments_with_different_keys() {
+        // The safety argument behind resetting the nonce counter at every
+        // segment boundary: the raw nonce bytes at local_chunk_index 0 are
+        // identical regardless of segment, but each segment's key differs,
+        // so the (key, nonce) pair as a whole is never repeated even though
+        // nonce bytes are.
+        let base_nonce = [0x11u8; NONCE_SIZE];
+        let nonce_segment0 = get_nonce(&base_nonce, 0).unwrap();
+        let nonce_segment1 = get_nonce(&base_nonce, 0).unwrap();
+        assert_eq!(nonce_segment0.as_slice(), nonce_segment1.as_slice());
+
+        let secret = vec![0x42; SHARED_SECRET_SIZE];
+        let salt = [0x33; SALT_SIZE];
+        let key_segment0 = derive_body_key_v3(&secret, &salt, 0).unwrap();
+        let key_segment1 = derive_body_key_v3(&secret, &salt, 1).unwrap();
+        assert_ne!(key_segment0.data, key_segment1.data);
+    }
+}
+
+// PQE3 body-chunk AAD tests.
+mod pqe3_aad_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_aad_v3_differs_across_segment_index() {
+        let header_hash = [0x77u8; 32];
+        let aad0 = build_aad_v3(AAD_CHUNK_TYPE_NORMAL, 0, 5, &header_hash);
+        let aad1 = build_aad_v3(AAD_CHUNK_TYPE_NORMAL, 1, 5, &header_hash);
+        assert_ne!(aad0, aad1);
+    }
+
+    #[test]
+    fn test_build_aad_v3_differs_across_local_chunk_index() {
+        let header_hash = [0x77u8; 32];
+        let aad_a = build_aad_v3(AAD_CHUNK_TYPE_NORMAL, 2, 0, &header_hash);
+        let aad_b = build_aad_v3(AAD_CHUNK_TYPE_NORMAL, 2, 1, &header_hash);
+        assert_ne!(aad_a, aad_b);
+    }
+
+    #[test]
+    fn test_build_aad_v3_length_distinct_from_other_channels() {
+        let header_hash = [0u8; 32];
+        let aad_v3 = build_aad_v3(AAD_CHUNK_TYPE_NORMAL, 0, 0, &header_hash);
+        let aad_v1v2 = build_aad(AAD_CHUNK_TYPE_NORMAL, 0, &header_hash);
+        let aad_metadata = build_metadata_aad(&header_hash);
+
+        assert_eq!(aad_v3.len(), 50);
+        assert_ne!(aad_v3.len(), aad_v1v2.len());
+        assert_ne!(aad_v3.len(), aad_metadata.len());
+    }
+
+    #[test]
+    fn test_build_aad_v3_version_byte() {
+        let header_hash = [0u8; 32];
+        let aad = build_aad_v3(AAD_CHUNK_TYPE_LAST, 3, 4, &header_hash);
+        assert_eq!(aad[0], AAD_VERSION_V3);
+        assert_eq!(aad[1], AAD_CHUNK_TYPE_LAST);
+    }
+}
+
+// PQE3 segment/local-chunk-index arithmetic tests.
+mod pqe3_segment_arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn test_segment_and_local_chunk_index_within_first_segment() {
+        let chunks_per_segment = 5;
+        for global in 0..chunks_per_segment {
+            let (segment, local) =
+                segment_and_local_chunk_index(global, chunks_per_segment).unwrap();
+            assert_eq!(segment, 0);
+            assert_eq!(local, global);
+        }
+    }
+
+    #[test]
+    fn test_segment_and_local_chunk_index_at_boundary() {
+        let chunks_per_segment = 5;
+        let (segment, local) =
+            segment_and_local_chunk_index(chunks_per_segment - 1, chunks_per_segment).unwrap();
+        assert_eq!((segment, local), (0, chunks_per_segment - 1));
+
+        let (segment, local) =
+            segment_and_local_chunk_index(chunks_per_segment, chunks_per_segment).unwrap();
+        assert_eq!((segment, local), (1, 0));
+
+        let (segment, local) =
+            segment_and_local_chunk_index(3 * chunks_per_segment + 2, chunks_per_segment).unwrap();
+        assert_eq!((segment, local), (3, 2));
+    }
+
+    #[test]
+    fn test_segment_and_local_chunk_index_real_constants() {
+        assert_eq!(CHUNKS_PER_SEGMENT, 131072);
+        assert!(SEGMENT_SIZE.is_multiple_of(CHUNK_SIZE as u64));
+
+        let (segment, local) =
+            segment_and_local_chunk_index(CHUNKS_PER_SEGMENT - 1, CHUNKS_PER_SEGMENT).unwrap();
+        assert_eq!((segment, local), (0, CHUNKS_PER_SEGMENT - 1));
+
+        let (segment, local) =
+            segment_and_local_chunk_index(CHUNKS_PER_SEGMENT, CHUNKS_PER_SEGMENT).unwrap();
+        assert_eq!((segment, local), (1, 0));
+    }
+
+    #[test]
+    fn test_segment_and_local_chunk_index_rejects_zero_chunks_per_segment() {
+        assert!(segment_and_local_chunk_index(0, 0).is_err());
+    }
+}
+
+// End-to-end PQE3 tests: real crypto, via the real encrypt_file/decrypt_file
+// (and their `_with_segment_size` variants for exercising multi-segment
+// transitions without an 8 GiB fixture -- chunks_per_segment is purely a
+// test-only seam, never part of the on-disk format; production always uses
+// the real CHUNKS_PER_SEGMENT constant via encrypt_file/decrypt_file).
+mod pqe3_format_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const TEST_PASSPHRASE: &str = "pqe3-test-passphrase";
+
+    /// Generates a real keypair on disk via the same `generate_keys` the CLI
+    /// uses, so `encrypt_file`/`decrypt_file` (which read PEM files from
+    /// paths, not in-memory keys) have real, valid inputs.
+    fn generate_test_keypair(dir: &std::path::Path) -> (String, String) {
+        let pub_path = dir.join("pub.pem");
+        let priv_path = dir.join("priv.pem");
+        generate_keys(
+            pub_path.to_str().unwrap(),
+            priv_path.to_str().unwrap(),
+            Some(TEST_PASSPHRASE.to_string()),
+        )
+        .unwrap();
+        (
+            pub_path.to_str().unwrap().to_string(),
+            priv_path.to_str().unwrap().to_string(),
+        )
+    }
+
+    /// Returns the on-disk header length of an already-encrypted file, by
+    /// running the same `parse_header` decrypt_file/verify_file use.
+    fn read_header_len(path: &std::path::Path) -> usize {
+        let mut fin = File::open(path).unwrap();
+        parse_header(&mut fin).unwrap().header_bytes.len()
+    }
+
+    /// Recomputes the (unauthenticated) SHA-256 checksum trailer over
+    /// tampered bytes so a tampering test isolates and proves AEAD-level
+    /// rejection -- the actual security mechanism -- rather than
+    /// incidentally being caught by the plain corruption-detection checksum
+    /// first. See the module doc comment's "Accepted Risks"/checksum-trailer
+    /// notes: the trailer is never a security control.
+    fn rewrite_checksum_trailer(bytes: &mut [u8]) {
+        use sha2::Digest;
+        let body_len = bytes.len() - TRAILER_SIZE;
+        let (body, trailer) = bytes.split_at_mut(body_len);
+        let digest: [u8; TRAILER_SIZE] = Sha256::digest(&body[..]).into();
+        trailer.copy_from_slice(&digest);
+    }
+
+    #[test]
+    fn test_pqe3_encrypt_writes_v3_magic() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, _priv_path) = generate_test_keypair(dir.path());
+        let input_path = dir.path().join("input.txt");
+        fs::write(&input_path, b"hello pqe3").unwrap();
+        let output_path = dir.path().join("output.pqe");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+
+        let bytes = fs::read(&output_path).unwrap();
+        assert_eq!(&bytes[..4], MAGIC_V3);
+    }
+
+    #[test]
+    fn test_pqe3_roundtrip_empty() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let input_path = dir.path().join("empty.bin");
+        fs::write(&input_path, b"").unwrap();
+        let output_path = dir.path().join("empty.pqe");
+        let restored_path = dir.path().join("empty_out.bin");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+        decrypt_file(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&restored_path).unwrap(), b"");
+    }
+
+    #[test]
+    fn test_pqe3_roundtrip_single_chunk() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0x11u8; 1234];
+        let input_path = dir.path().join("single.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("single.pqe");
+        let restored_path = dir.path().join("single_out.bin");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+        decrypt_file(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&restored_path).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_pqe3_roundtrip_multichunk_single_segment() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0xABu8; 3 * CHUNK_SIZE + 777];
+        let input_path = dir.path().join("multi.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("multi.pqe");
+        let restored_path = dir.path().join("multi_out.bin");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+        decrypt_file(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&restored_path).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_pqe3_roundtrip_multi_segment_transition() {
+        // chunks_per_segment = 2 with 5 chunks of plaintext (4 full +
+        // 1 partial) produces segments of sizes [2, 2, 1] -- a full
+        // segment-boundary rekey and a short final segment together.
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
+        let input_path = dir.path().join("multi_segment.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("multi_segment.pqe");
+        let restored_path = dir.path().join("multi_segment_out.bin");
+
+        encrypt_file_with_segment_size(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+            2,
+        )
+        .unwrap();
+        decrypt_file_with_segment_size(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&restored_path).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_pqe3_tampering_chunk_swapped_across_segments() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
+        let input_path = dir.path().join("swap_in.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("swap.pqe");
+
+        encrypt_file_with_segment_size(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+            2,
+        )
+        .unwrap();
+
+        let header_len = read_header_len(&output_path);
+        let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
+        let mut bytes = fs::read(&output_path).unwrap();
+
+        // Chunk 0 (segment 0, local 0) and chunk 2 (segment 1, local 0) are
+        // both full-size chunks -- same length, so swapping them in place
+        // leaves the file's total size and every other chunk's position
+        // unaffected, isolating the tamper to exactly a cross-segment
+        // cut-and-paste.
+        let chunk0_start = header_len;
+        let chunk2_start = header_len + 2 * encrypted_chunk_size;
+        let (left, right) = bytes.split_at_mut(chunk2_start);
+        left[chunk0_start..chunk0_start + encrypted_chunk_size]
+            .swap_with_slice(&mut right[..encrypted_chunk_size]);
+
+        rewrite_checksum_trailer(&mut bytes);
+        fs::write(&output_path, &bytes).unwrap();
+
+        let restored_path = dir.path().join("swap_out.bin");
+        let result = decrypt_file_with_segment_size(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+            2,
+        );
+        assert!(
+            result.is_err(),
+            "swapping ciphertext chunks across segments must fail AEAD verification \
+            even with a matching checksum trailer"
+        );
+    }
+
+    #[test]
+    fn test_pqe3_tampering_corrupted_final_tag() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
+        let input_path = dir.path().join("tag_in.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("tag.pqe");
+
+        encrypt_file_with_segment_size(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+            2,
+        )
+        .unwrap();
+
+        let mut bytes = fs::read(&output_path).unwrap();
+        // The final chunk's 16-byte AEAD tag is the TRAILER_SIZE bytes
+        // immediately before the checksum trailer at the end of the file.
+        let tag_byte = bytes.len() - TRAILER_SIZE - 1;
+        bytes[tag_byte] ^= 0xFF;
+        rewrite_checksum_trailer(&mut bytes);
+        fs::write(&output_path, &bytes).unwrap();
+
+        let restored_path = dir.path().join("tag_out.bin");
+        let result = decrypt_file_with_segment_size(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+            2,
+        );
+        assert!(
+            result.is_err(),
+            "a corrupted final-chunk tag must fail AEAD verification"
+        );
+    }
+
+    #[test]
+    fn test_pqe3_tampering_truncated_body() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
+        let input_path = dir.path().join("trunc_in.bin");
+        fs::write(&input_path, &plaintext).unwrap();
+        let output_path = dir.path().join("trunc.pqe");
+
+        encrypt_file_with_segment_size(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+            2,
+        )
+        .unwrap();
+
+        let mut bytes = fs::read(&output_path).unwrap();
+        bytes.truncate(bytes.len() - 100);
+        fs::write(&output_path, &bytes).unwrap();
+
+        let restored_path = dir.path().join("trunc_out.bin");
+        let result = decrypt_file_with_segment_size(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+            2,
+        );
+        assert!(
+            result.is_err(),
+            "truncated PQE3 body must be rejected cleanly, not panic"
+        );
+    }
+
+    #[test]
+    fn test_pqe3_tampering_corrupted_checksum_trailer() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let input_path = dir.path().join("trailer_in.bin");
+        fs::write(&input_path, b"some pqe3 content").unwrap();
+        let output_path = dir.path().join("trailer.pqe");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+
+        let mut bytes = fs::read(&output_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        fs::write(&output_path, &bytes).unwrap();
+
+        let restored_path = dir.path().join("trailer_out.bin");
+        let result = decrypt_file(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            &priv_path,
+            Some(TEST_PASSPHRASE.to_string()),
+        );
+        let err = result.expect_err("corrupted trailer must fail the verify preflight");
+        assert!(
+            format!("{err:#}").contains("CHECKSUM MISMATCH"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!restored_path.exists());
+    }
+
+    #[test]
+    fn test_verify_open_file_recognizes_pqe3() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, _priv_path) = generate_test_keypair(dir.path());
+        let input_path = dir.path().join("verify_in.bin");
+        fs::write(&input_path, b"verify me").unwrap();
+        let output_path = dir.path().join("verify.pqe");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+
+        let mut fin = File::open(&output_path).unwrap();
+        let verified = verify_open_file(&mut fin, output_path.to_str().unwrap()).unwrap();
+        assert_eq!(verified.parsed.version.label(), "PQE3");
+    }
+}
