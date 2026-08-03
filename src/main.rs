@@ -92,6 +92,62 @@
 //! segment can never be replayed into another segment's position: wrong key
 //! *and* wrong AAD), and header substitution.
 //!
+//! # Private-Key Envelope Format
+//! The passphrase-protected private-key blob -- the entire content of a
+//! `PQENC ENCRYPTED PRIVATE KEY` PEM file, before PEM-wrapping -- is a
+//! small binary envelope with its own version tag, separate from the
+//! `PQE1`/`PQE2`/`PQE3` magic above (that magic versions the encrypted
+//! *file* format; this section is about the encrypted *private key*
+//! format):
+//! ```text
+//! [1 byte:  envelope version = 0x01]
+//! [1 byte:  KDF algorithm id = 0x01 (Argon2id)]
+//! [1 byte:  AEAD algorithm id = 0x01 (AES-256-GCM)]
+//! [4 bytes: KDF-params TLV region length, BE]
+//! [P bytes: TLV-encoded Argon2id parameters (encode_tlv_fields/
+//!           parse_tlv_fields, the same encoding as the main file format's
+//!           TLV regions above): memory_cost, time_cost, parallelism, and
+//!           key_length, each a 4-byte BE u32 value. All four are
+//!           required; an unrecognized extra field ID is ignored, so a
+//!           future Argon2 knob can be added without another envelope
+//!           version bump]
+//! [16 bytes: salt]
+//! [12 bytes: nonce]
+//! [4 bytes: ciphertext length, BE]
+//! [C bytes: AES-256-GCM ciphertext of the composite private key (includes
+//!           the 16-byte GCM tag), AAD-bound to every header byte above so
+//!           header tampering is rejected]
+//! ```
+//! `pqenc generate-keys` always writes this V1 envelope, using whatever
+//! `ARGON2_MEMORY_COST`/`ARGON2_TIME_COST`/`ARGON2_PARALLELISM`/
+//! `ARGON2_KEY_LENGTH` are current at encryption time -- recording them in
+//! the envelope is what lets those defaults change in a later release
+//! without breaking keys already written under the old values.
+//!
+//! Envelopes written before this versioning existed carry no version byte
+//! at all -- just `salt(16) || nonce(12) || ciphertext`, with no recorded
+//! parameters -- and remain decrypt-only, using the Argon2id parameters
+//! and AAD literal frozen at their original hard-coded values
+//! (`Argon2Params::LEGACY`, `KEY_ENVELOPE_AAD_LEGACY`) regardless of what a
+//! later release changes for new keys.
+//!
+//! The two shapes are told apart by *exact byte length*, not by a reserved
+//! version-byte value: every legacy envelope is exactly
+//! `LEGACY_KEY_ENVELOPE_LEN` (3248) bytes, because the plaintext it always
+//! encrypts -- the composite private key -- has a fixed size (fixed-size
+//! ML-KEM-1024 and X25519 secret keys). A reserved first-byte marker
+//! would instead collide with a genuine legacy envelope's random salt
+//! byte about 1 time in 256; the length check is a structural fact, not a
+//! probabilistic guess, and is never ambiguous in either direction (a V1
+//! envelope always carries strictly more header overhead than
+//! `LEGACY_KEY_ENVELOPE_LEN` for the same plaintext size). See
+//! `LEGACY_KEY_ENVELOPE_LEN`'s doc comment for the one corner case this
+//! implies: a corrupted/truncated V1 envelope that happens to land at
+//! exactly 3248 bytes is misrouted into the legacy parser and fails with a
+//! generic error instead of a precise "unrecognized version" one -- always
+//! a safe failure (GCM authentication still rejects it), just a less
+//! specific diagnostic in that one scenario.
+//!
 //! # Accepted Risks
 //! - AES-GCM integrity guarantees degrade beyond ~64 GiB under a single key
 //!   due to birthday-bound limits on the authentication polynomial. PQE3
@@ -253,6 +309,67 @@ const ARGON2_PARALLELISM: u32 = 4;
 const ARGON2_SALT_SIZE: usize = 16;
 const ARGON2_KEY_LENGTH: usize = 32;
 const PBE_NONCE_SIZE: usize = 12;
+
+// Private-key envelope format tags (see "Private-Key Envelope Format" doc
+// comment above and decrypt_private_key below). A separate version space
+// from MAGIC_V1/V2/V3 above -- those version the encrypted *file* format,
+// these version the encrypted *private key* format.
+const KEY_ENVELOPE_VERSION_V1: u8 = 0x01;
+const KDF_ALG_ARGON2ID: u8 = 0x01;
+const AEAD_ALG_AES_256_GCM: u8 = 0x01;
+
+// KDF-params TLV field IDs (V1 envelope only) -- their own namespace,
+// separate from METADATA_FIELD_*/EXTENSION_FIELD_* above, since those are
+// different TLV regions in a different format.
+const KDF_PARAM_FIELD_MEMORY_COST: u8 = 0x01;
+const KDF_PARAM_FIELD_TIME_COST: u8 = 0x02;
+const KDF_PARAM_FIELD_PARALLELISM: u8 = 0x03;
+const KDF_PARAM_FIELD_KEY_LENGTH: u8 = 0x04;
+
+// Bounds on attacker/corruption-controlled length and numeric fields in a V1
+// envelope -- same defensive role as MAX_KEM_CIPHERTEXT_SIZE/
+// MAX_EXTENSION_REGION_SIZE above: an oversized length claim can't drive a
+// huge allocation, and an oversized Argon2 cost claim can't make decrypting
+// a corrupted envelope hang for an attacker-chosen amount of time.
+const MAX_KEY_ENVELOPE_KDF_PARAMS_SIZE: usize = 4096;
+const MAX_KEY_ENVELOPE_CIPHERTEXT_SIZE: usize = 65536;
+const MAX_ENVELOPE_ARGON2_MEMORY_COST: u32 = 4 * 1024 * 1024; // KiB (4 GiB)
+const MAX_ENVELOPE_ARGON2_TIME_COST: u32 = 100;
+const MAX_ENVELOPE_ARGON2_PARALLELISM: u32 = 256;
+
+// AAD literals for the two envelope shapes decrypt_private_key accepts.
+// KEY_ENVELOPE_AAD_LEGACY must never change: it's byte-for-byte what every
+// already-existing legacy private key was encrypted under.
+const KEY_ENVELOPE_AAD_LEGACY: &[u8] = b"pqenc-private-key-v1";
+const KEY_ENVELOPE_AAD_V1_PREFIX: &[u8] = b"pqenc-private-key-envelope-v1";
+
+// Size of the composite private key plaintext this tool has always produced
+// ([4-byte len][ML-KEM-1024 secret key][X25519 secret key]) -- fixed
+// because both key sizes are fixed by their respective schemes.
+const COMPOSITE_PRIVATE_KEY_SIZE: usize = 4 + MLKEM1024_PRIVATE_KEY_SIZE + X25519_PRIVATE_KEY_SIZE;
+
+// Exact byte length of every private-key envelope this tool wrote before
+// this format-versioning change (salt || nonce || ciphertext, ciphertext
+// being COMPOSITE_PRIVATE_KEY_SIZE plaintext + TAG_SIZE). decrypt_private_key
+// uses this exact length -- not a reserved version-byte value -- to tell a
+// legacy envelope apart from a new (versioned) one: see the "Private-Key
+// Envelope Format" doc comment above for why a length check is the safe
+// discriminator here. A reserved first-byte marker would collide with a
+// genuine legacy salt byte about 1 time in 256, since a legacy envelope's
+// first byte is uniformly random; this length is instead a structural fact
+// about the fixed-size plaintext, never ambiguous.
+const LEGACY_KEY_ENVELOPE_LEN: usize =
+    ARGON2_SALT_SIZE + PBE_NONCE_SIZE + COMPOSITE_PRIVATE_KEY_SIZE + TAG_SIZE;
+
+// Argon2id parameters implied by every legacy (unversioned) envelope,
+// frozen exactly at today's ARGON2_* values above. decrypt_private_key's
+// legacy path must use these, never ARGON2_MEMORY_COST/etc, so that raising
+// the latter for new keys -- the whole point of this format change -- can
+// never change what parameters a legacy key is decrypted with.
+const LEGACY_ARGON2_MEMORY_COST: u32 = 65536;
+const LEGACY_ARGON2_TIME_COST: u32 = 3;
+const LEGACY_ARGON2_PARALLELISM: u32 = 4;
+const LEGACY_ARGON2_KEY_LENGTH: u32 = 32;
 
 // PEM headers
 const PEM_PUB_BEGIN: &str = "-----BEGIN PQENC PUBLIC KEY-----";
@@ -532,8 +649,44 @@ fn pem_decode(pem_text: &str, begin: &str, end: &str) -> Result<Vec<u8>> {
         .context("Failed to decode base64")
 }
 
+/// Argon2id parameters an envelope records (V1) or implies (Legacy) --
+/// everything `derive_key_from_passphrase` needs beyond the salt and
+/// passphrase itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Argon2Params {
+    memory_cost: u32,
+    time_cost: u32,
+    parallelism: u32,
+    key_length: u32,
+}
+
+impl Argon2Params {
+    /// Parameters used for newly-written V1 envelopes -- tracks `ARGON2_*`
+    /// above, so a future hardening bump there flows into new keys
+    /// automatically without touching this struct.
+    const CURRENT: Argon2Params = Argon2Params {
+        memory_cost: ARGON2_MEMORY_COST,
+        time_cost: ARGON2_TIME_COST,
+        parallelism: ARGON2_PARALLELISM,
+        key_length: ARGON2_KEY_LENGTH as u32,
+    };
+
+    /// Parameters implied by every legacy envelope -- frozen, see
+    /// `LEGACY_ARGON2_*` above.
+    const LEGACY: Argon2Params = Argon2Params {
+        memory_cost: LEGACY_ARGON2_MEMORY_COST,
+        time_cost: LEGACY_ARGON2_TIME_COST,
+        parallelism: LEGACY_ARGON2_PARALLELISM,
+        key_length: LEGACY_ARGON2_KEY_LENGTH,
+    };
+}
+
 /// Derive encryption key from passphrase using Argon2id
-fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<SensitiveData> {
+fn derive_key_from_passphrase(
+    passphrase: &[u8],
+    salt: &[u8],
+    params: &Argon2Params,
+) -> Result<SensitiveData> {
     use argon2::{Algorithm, Argon2, Params, Version};
 
     if passphrase.is_empty() {
@@ -543,15 +696,15 @@ fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<Sensitiv
         bail!("Invalid salt size");
     }
 
-    let params = Params::new(
-        ARGON2_MEMORY_COST,
-        ARGON2_TIME_COST,
-        ARGON2_PARALLELISM,
-        Some(ARGON2_KEY_LENGTH),
+    let argon2_params = Params::new(
+        params.memory_cost,
+        params.time_cost,
+        params.parallelism,
+        Some(params.key_length as usize),
     )?;
 
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = vec![0u8; ARGON2_KEY_LENGTH];
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
+    let mut key = vec![0u8; params.key_length as usize];
     argon2
         .hash_password_into(passphrase, salt, &mut key)
         .map_err(|e| anyhow::anyhow!("Argon2 failed: {}", e))?;
@@ -559,47 +712,143 @@ fn derive_key_from_passphrase(passphrase: &[u8], salt: &[u8]) -> Result<Sensitiv
     Ok(SensitiveData::new(key))
 }
 
-/// Encrypt composite private key with passphrase
+/// TLV-encodes Argon2id parameters for a V1 envelope header, reusing the
+/// same TLV encoding as the main file format's header regions
+/// (`encode_tlv_fields`/`parse_tlv_fields`).
+fn encode_kdf_params(params: &Argon2Params) -> Vec<u8> {
+    encode_tlv_fields(&[
+        (
+            KDF_PARAM_FIELD_MEMORY_COST,
+            &params.memory_cost.to_be_bytes(),
+        ),
+        (KDF_PARAM_FIELD_TIME_COST, &params.time_cost.to_be_bytes()),
+        (
+            KDF_PARAM_FIELD_PARALLELISM,
+            &params.parallelism.to_be_bytes(),
+        ),
+        (KDF_PARAM_FIELD_KEY_LENGTH, &params.key_length.to_be_bytes()),
+    ])
+}
+
+/// Parses a V1 envelope's KDF-params TLV region. Unlike the main file
+/// format's optional TLV fields, all four of these are load-bearing for key
+/// derivation, so a missing field is a hard error, not a silently-applied
+/// default. An unrecognized extra field ID is still ignored (forward
+/// compatibility for a future Argon2 knob).
+fn parse_kdf_params(region: &[u8]) -> Result<Argon2Params> {
+    let fields = parse_tlv_fields(region)?;
+
+    let mut memory_cost = None;
+    let mut time_cost = None;
+    let mut parallelism = None;
+    let mut key_length = None;
+
+    for (field_id, value) in fields {
+        let value: [u8; 4] = value
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid KDF parameter field length"))?;
+        let value = u32::from_be_bytes(value);
+        match field_id {
+            KDF_PARAM_FIELD_MEMORY_COST => memory_cost = Some(value),
+            KDF_PARAM_FIELD_TIME_COST => time_cost = Some(value),
+            KDF_PARAM_FIELD_PARALLELISM => parallelism = Some(value),
+            KDF_PARAM_FIELD_KEY_LENGTH => key_length = Some(value),
+            _ => {} // Unrecognized field: forward-compatible, ignore.
+        }
+    }
+
+    Ok(Argon2Params {
+        memory_cost: memory_cost.context("Missing Argon2 memory_cost parameter")?,
+        time_cost: time_cost.context("Missing Argon2 time_cost parameter")?,
+        parallelism: parallelism.context("Missing Argon2 parallelism parameter")?,
+        key_length: key_length.context("Missing Argon2 key_length parameter")?,
+    })
+}
+
+/// Encrypt composite private key with passphrase, always writing the
+/// current (V1) envelope format -- see the "Private-Key Envelope Format"
+/// module doc section for the byte layout.
 fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8>> {
     use rand::RngExt;
 
+    let params = Argon2Params::CURRENT;
     let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
-    let key = derive_key_from_passphrase(passphrase, &salt)?;
+    let key = derive_key_from_passphrase(passphrase, &salt, &params)?;
 
     let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+
+    // Header covers everything the AAD binds: version, algorithm IDs,
+    // KDF params, salt, nonce -- but not the ciphertext-length prefix or
+    // ciphertext itself, which follow it.
+    let mut header = Vec::new();
+    header.push(KEY_ENVELOPE_VERSION_V1);
+    header.push(KDF_ALG_ARGON2ID);
+    header.push(AEAD_ALG_AES_256_GCM);
+    let kdf_params = encode_kdf_params(&params);
+    header.extend_from_slice(&(kdf_params.len() as u32).to_be_bytes());
+    header.extend_from_slice(&kdf_params);
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&nonce);
+
+    let mut aad = Vec::with_capacity(KEY_ENVELOPE_AAD_V1_PREFIX.len() + header.len());
+    aad.extend_from_slice(KEY_ENVELOPE_AAD_V1_PREFIX);
+    aad.extend_from_slice(&header);
 
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: composite_key,
-                aad: b"pqenc-private-key-v1",
+                aad: &aad,
             },
         )
         .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-    // Return: salt || nonce || ciphertext
-    let mut result = Vec::with_capacity(salt.len() + nonce.len() + ciphertext.len());
-    result.extend_from_slice(&salt);
-    result.extend_from_slice(&nonce);
+    let mut result = Vec::with_capacity(header.len() + 4 + ciphertext.len());
+    result.extend_from_slice(&header);
+    result.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
     result.extend_from_slice(&ciphertext);
 
     Ok(result)
 }
 
-/// Decrypt private key with passphrase
-fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
-    let min_size = ARGON2_SALT_SIZE + PBE_NONCE_SIZE + 1 + 16; // +16 for GCM tag
-    if encrypted_blob.len() < min_size {
-        bail!("Encrypted data too short");
+/// Reads and advances past the next `n` bytes of `data`, starting at
+/// `*pos`. Small cursor helper for `decrypt_private_key_v1`'s sequential,
+/// bounds-checked parse -- mirrors `parse_tlv_fields`'s own manual
+/// bounds-checking style.
+fn take_bytes<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8]> {
+    if *pos + n > data.len() {
+        bail!("Truncated private key envelope");
     }
+    let slice = &data[*pos..*pos + n];
+    *pos += n;
+    Ok(slice)
+}
 
+/// Decrypt private key with passphrase. Dispatches on exact envelope
+/// length -- see `LEGACY_KEY_ENVELOPE_LEN`'s doc comment and the
+/// "Private-Key Envelope Format" module doc section for why length, not a
+/// version-byte marker, is what tells a legacy envelope apart from a V1
+/// one here.
+fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
+    if encrypted_blob.len() == LEGACY_KEY_ENVELOPE_LEN {
+        decrypt_private_key_legacy(encrypted_blob, passphrase)
+    } else {
+        decrypt_private_key_v1(encrypted_blob, passphrase)
+    }
+}
+
+/// Decrypts a pre-versioning envelope: `salt(16) || nonce(12) ||
+/// ciphertext`, no version tag, always exactly `LEGACY_KEY_ENVELOPE_LEN`
+/// bytes. Parameters and AAD are frozen at their original values forever --
+/// see `Argon2Params::LEGACY` and `KEY_ENVELOPE_AAD_LEGACY`.
+fn decrypt_private_key_legacy(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
     let salt = &encrypted_blob[..ARGON2_SALT_SIZE];
     let nonce = &encrypted_blob[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + PBE_NONCE_SIZE];
     let ciphertext = &encrypted_blob[ARGON2_SALT_SIZE + PBE_NONCE_SIZE..];
 
-    let key = derive_key_from_passphrase(passphrase, salt)?;
+    let key = derive_key_from_passphrase(passphrase, salt, &Argon2Params::LEGACY)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
 
     let plaintext = cipher
@@ -607,7 +856,95 @@ fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<Sensi
             Nonce::from_slice(nonce),
             Payload {
                 msg: ciphertext,
-                aad: b"pqenc-private-key-v1",
+                aad: KEY_ENVELOPE_AAD_LEGACY,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;
+
+    Ok(SensitiveData::new(plaintext))
+}
+
+/// Decrypts a versioned (V1) envelope -- see the "Private-Key Envelope
+/// Format" module doc section for the byte layout. Every length-prefixed
+/// field is bounds-checked before use, and every parsed Argon2 parameter is
+/// validated before being handed to Argon2/AES-GCM: an out-of-range
+/// `key_length` would otherwise panic in `Key::<Aes256Gcm>::from_slice`
+/// rather than fail gracefully, and an out-of-range memory/time cost could
+/// make decrypting a corrupted envelope hang for an attacker-chosen amount
+/// of time before even attempting the passphrase.
+fn decrypt_private_key_v1(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
+    let mut pos = 0usize;
+
+    let version = take_bytes(encrypted_blob, &mut pos, 1)?[0];
+    if version != KEY_ENVELOPE_VERSION_V1 {
+        bail!("Unrecognized private key envelope version: {}", version);
+    }
+    let kdf_alg = take_bytes(encrypted_blob, &mut pos, 1)?[0];
+    if kdf_alg != KDF_ALG_ARGON2ID {
+        bail!(
+            "Unrecognized private key envelope KDF algorithm: {}",
+            kdf_alg
+        );
+    }
+    let aead_alg = take_bytes(encrypted_blob, &mut pos, 1)?[0];
+    if aead_alg != AEAD_ALG_AES_256_GCM {
+        bail!(
+            "Unrecognized private key envelope AEAD algorithm: {}",
+            aead_alg
+        );
+    }
+
+    let kdf_params_len =
+        u32::from_be_bytes(take_bytes(encrypted_blob, &mut pos, 4)?.try_into().unwrap()) as usize;
+    if kdf_params_len > MAX_KEY_ENVELOPE_KDF_PARAMS_SIZE {
+        bail!("Invalid KDF parameters length: {}", kdf_params_len);
+    }
+    let kdf_params_region = take_bytes(encrypted_blob, &mut pos, kdf_params_len)?;
+    let params = parse_kdf_params(kdf_params_region)?;
+
+    if params.key_length as usize != AES_KEY_SIZE {
+        bail!("Unsupported Argon2 key length: {}", params.key_length);
+    }
+    if params.memory_cost > MAX_ENVELOPE_ARGON2_MEMORY_COST {
+        bail!("Argon2 memory cost too large: {}", params.memory_cost);
+    }
+    if params.time_cost > MAX_ENVELOPE_ARGON2_TIME_COST {
+        bail!("Argon2 time cost too large: {}", params.time_cost);
+    }
+    if params.parallelism == 0 || params.parallelism > MAX_ENVELOPE_ARGON2_PARALLELISM {
+        bail!("Argon2 parallelism out of range: {}", params.parallelism);
+    }
+
+    let salt = take_bytes(encrypted_blob, &mut pos, ARGON2_SALT_SIZE)?;
+    let nonce = take_bytes(encrypted_blob, &mut pos, PBE_NONCE_SIZE)?;
+
+    // Everything up to here is what encrypt_private_key bound into the AAD.
+    let header = &encrypted_blob[..pos];
+
+    let ciphertext_len =
+        u32::from_be_bytes(take_bytes(encrypted_blob, &mut pos, 4)?.try_into().unwrap()) as usize;
+    if !(TAG_SIZE..=MAX_KEY_ENVELOPE_CIPHERTEXT_SIZE).contains(&ciphertext_len) {
+        bail!("Invalid private key ciphertext length: {}", ciphertext_len);
+    }
+    let ciphertext = take_bytes(encrypted_blob, &mut pos, ciphertext_len)?;
+
+    if pos != encrypted_blob.len() {
+        bail!("Trailing data after private key envelope");
+    }
+
+    let mut aad = Vec::with_capacity(KEY_ENVELOPE_AAD_V1_PREFIX.len() + header.len());
+    aad.extend_from_slice(KEY_ENVELOPE_AAD_V1_PREFIX);
+    aad.extend_from_slice(header);
+
+    let key = derive_key_from_passphrase(passphrase, salt, &params)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
             },
         )
         .map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;

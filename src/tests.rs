@@ -60,8 +60,8 @@ mod passphrase_tests {
         let passphrase = b"test-passphrase";
         let salt = [42u8; ARGON2_SALT_SIZE];
 
-        let key1 = derive_key_from_passphrase(passphrase, &salt).unwrap();
-        let key2 = derive_key_from_passphrase(passphrase, &salt).unwrap();
+        let key1 = derive_key_from_passphrase(passphrase, &salt, &Argon2Params::CURRENT).unwrap();
+        let key2 = derive_key_from_passphrase(passphrase, &salt, &Argon2Params::CURRENT).unwrap();
 
         assert_eq!(key1.data, key2.data);
     }
@@ -72,8 +72,8 @@ mod passphrase_tests {
         let salt1 = [1u8; ARGON2_SALT_SIZE];
         let salt2 = [2u8; ARGON2_SALT_SIZE];
 
-        let key1 = derive_key_from_passphrase(passphrase, &salt1).unwrap();
-        let key2 = derive_key_from_passphrase(passphrase, &salt2).unwrap();
+        let key1 = derive_key_from_passphrase(passphrase, &salt1, &Argon2Params::CURRENT).unwrap();
+        let key2 = derive_key_from_passphrase(passphrase, &salt2, &Argon2Params::CURRENT).unwrap();
 
         assert_ne!(key1.data, key2.data);
     }
@@ -81,7 +81,7 @@ mod passphrase_tests {
     #[test]
     fn test_derive_key_empty_passphrase() {
         let salt = [0u8; ARGON2_SALT_SIZE];
-        let result = derive_key_from_passphrase(b"", &salt);
+        let result = derive_key_from_passphrase(b"", &salt, &Argon2Params::CURRENT);
         assert!(result.is_err());
     }
 
@@ -89,14 +89,47 @@ mod passphrase_tests {
     fn test_derive_key_output_length() {
         let passphrase = b"passphrase";
         let salt = [0u8; ARGON2_SALT_SIZE];
-        let key = derive_key_from_passphrase(passphrase, &salt).unwrap();
+        let key = derive_key_from_passphrase(passphrase, &salt, &Argon2Params::CURRENT).unwrap();
         assert_eq!(key.data.len(), ARGON2_KEY_LENGTH);
+    }
+
+    // Canary: if LEGACY_ARGON2_* were ever "cleaned up" to alias ARGON2_*,
+    // legacy keys would silently start being decrypted with whatever
+    // ARGON2_* becomes in a future release -- exactly the bug this envelope
+    // versioning exists to prevent. Comparing against literals (not the
+    // constants themselves) makes that mistake fail loudly here.
+    #[test]
+    fn test_legacy_argon2_params_are_frozen() {
+        assert_eq!(
+            Argon2Params::LEGACY,
+            Argon2Params {
+                memory_cost: 65536,
+                time_cost: 3,
+                parallelism: 4,
+                key_length: 32,
+            }
+        );
     }
 }
 
-// Private key encryption/decryption tests
+// Private key encryption/decryption tests. encrypt_private_key always
+// writes the V1 envelope format, so these exercise it end-to-end; see
+// key_envelope_legacy_compat_tests below for legacy-envelope and
+// V1-structural coverage.
 mod key_encryption_tests {
     use super::*;
+
+    // Canary for the length-based legacy/V1 dispatch in decrypt_private_key:
+    // if a future header-layout tweak ever shrank V1's overhead down to
+    // exactly LEGACY_KEY_ENVELOPE_LEN for some plaintext size, new keys
+    // would silently misroute into the legacy parser. Real production
+    // output must never collide.
+    #[test]
+    fn test_new_envelopes_are_not_legacy_length() {
+        let composite_key = vec![0x42u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let encrypted = encrypt_private_key(&composite_key, b"passphrase").unwrap();
+        assert_ne!(encrypted.len(), LEGACY_KEY_ENVELOPE_LEN);
+    }
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
@@ -228,6 +261,289 @@ mod key_parsing_tests {
         composite.extend_from_slice(&x25519_sk);
 
         let result = parse_private_composite_key(&composite);
+        assert!(result.is_err());
+    }
+}
+
+/// Builds a synthetic legacy (pre-versioning) private-key envelope --
+/// `salt || nonce || ciphertext`, no version tag -- exactly the shape
+/// `encrypt_private_key` produced before this format-versioning change.
+/// Needed because nothing in the current codebase can produce this shape
+/// anymore; it must be hand-built from the same primitives, mirroring how
+/// `build_test_pqe_header` hand-builds old `.pqe` file-format shapes.
+fn build_legacy_key_envelope(passphrase: &[u8], composite_key: &[u8]) -> Vec<u8> {
+    use rand::RngExt;
+
+    let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
+    let key = derive_key_from_passphrase(passphrase, &salt, &Argon2Params::LEGACY).unwrap();
+    let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: composite_key,
+                aad: KEY_ENVELOPE_AAD_LEGACY,
+            },
+        )
+        .unwrap();
+
+    let mut result = Vec::new();
+    result.extend_from_slice(&salt);
+    result.extend_from_slice(&nonce);
+    result.extend_from_slice(&ciphertext);
+    result
+}
+
+/// Builds a synthetic V1 envelope with caller-chosen Argon2 params, so
+/// tests can prove `decrypt_private_key_v1` actually uses the params
+/// *recorded in the envelope* rather than always falling back to
+/// `Argon2Params::CURRENT`. Mirrors `encrypt_private_key`'s own envelope
+/// assembly exactly.
+fn build_v1_key_envelope(
+    passphrase: &[u8],
+    composite_key: &[u8],
+    params: &Argon2Params,
+) -> Vec<u8> {
+    use rand::RngExt;
+
+    let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
+    let key = derive_key_from_passphrase(passphrase, &salt, params).unwrap();
+    let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+
+    let mut header = Vec::new();
+    header.push(KEY_ENVELOPE_VERSION_V1);
+    header.push(KDF_ALG_ARGON2ID);
+    header.push(AEAD_ALG_AES_256_GCM);
+    let kdf_params = encode_kdf_params(params);
+    header.extend_from_slice(&(kdf_params.len() as u32).to_be_bytes());
+    header.extend_from_slice(&kdf_params);
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&nonce);
+
+    let mut aad = Vec::new();
+    aad.extend_from_slice(KEY_ENVELOPE_AAD_V1_PREFIX);
+    aad.extend_from_slice(&header);
+
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: composite_key,
+                aad: &aad,
+            },
+        )
+        .unwrap();
+
+    let mut result = header;
+    result.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    result.extend_from_slice(&ciphertext);
+    result
+}
+
+/// Builds a structurally well-formed V1 envelope header (with the given,
+/// possibly-invalid, claimed params) plus an all-zero fake ciphertext of
+/// the right length -- without ever calling Argon2/AES-GCM. Needed for
+/// tests of params so out-of-range (huge memory cost, wrong key length)
+/// that actually deriving/encrypting under them would hang or panic; since
+/// decrypt_private_key_v1 must reject these during parameter validation,
+/// before ever deriving a key or touching AEAD, the ciphertext bytes'
+/// authenticity is irrelevant to what's being tested.
+fn build_v1_envelope_with_fake_ciphertext(params: &Argon2Params, plaintext_len: usize) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.push(KEY_ENVELOPE_VERSION_V1);
+    header.push(KDF_ALG_ARGON2ID);
+    header.push(AEAD_ALG_AES_256_GCM);
+    let kdf_params = encode_kdf_params(params);
+    header.extend_from_slice(&(kdf_params.len() as u32).to_be_bytes());
+    header.extend_from_slice(&kdf_params);
+    header.extend_from_slice(&[0u8; ARGON2_SALT_SIZE]);
+    header.extend_from_slice(&[0u8; PBE_NONCE_SIZE]);
+
+    let mut envelope = header;
+    let fake_ciphertext = vec![0u8; plaintext_len + TAG_SIZE];
+    envelope.extend_from_slice(&(fake_ciphertext.len() as u32).to_be_bytes());
+    envelope.extend_from_slice(&fake_ciphertext);
+    envelope
+}
+
+// Legacy/V1 private-key envelope dispatch and structural-corruption tests.
+// key_encryption_tests above only ever exercises real encrypt_private_key
+// output (always V1); these use build_legacy_key_envelope/
+// build_v1_key_envelope to construct byte shapes encrypt_private_key can no
+// longer produce, mirroring the pqe2_format_tests precedent below for the
+// main .pqe file format.
+mod key_envelope_legacy_compat_tests {
+    use super::*;
+
+    #[test]
+    fn test_decrypt_legacy_envelope_roundtrip() {
+        let composite_key = vec![0xABu8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let envelope = build_legacy_key_envelope(b"correct horse", &composite_key);
+        assert_eq!(envelope.len(), LEGACY_KEY_ENVELOPE_LEN);
+
+        let decrypted = decrypt_private_key(&envelope, b"correct horse").unwrap();
+        assert_eq!(decrypted.data, composite_key);
+    }
+
+    #[test]
+    fn test_decrypt_legacy_envelope_wrong_passphrase() {
+        let composite_key = vec![0xABu8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let envelope = build_legacy_key_envelope(b"correct horse", &composite_key);
+
+        let result = decrypt_private_key(&envelope, b"wrong horse");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_legacy_envelope_corrupted_ciphertext() {
+        let composite_key = vec![0xABu8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope = build_legacy_key_envelope(b"correct horse", &composite_key);
+        let last = envelope.len() - 1;
+        envelope[last] ^= 0xFF;
+
+        let result = decrypt_private_key(&envelope, b"correct horse");
+        assert!(result.is_err());
+    }
+
+    // The core property this format change exists to establish: parameters
+    // *recorded in the envelope*, not hard-coded current defaults, drive
+    // key derivation -- so a future ARGON2_* hardening bump can't affect
+    // keys written under different recorded parameters.
+    #[test]
+    fn test_decrypt_v1_roundtrip_with_nondefault_params() {
+        let composite_key = vec![0xCDu8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let params = Argon2Params {
+            memory_cost: 32768,
+            time_cost: 2,
+            parallelism: 1,
+            key_length: 32,
+        };
+        let envelope = build_v1_key_envelope(b"passphrase", &composite_key, &params);
+
+        let decrypted = decrypt_private_key(&envelope, b"passphrase").unwrap();
+        assert_eq!(decrypted.data, composite_key);
+    }
+
+    #[test]
+    fn test_decrypt_v1_unrecognized_version_byte() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        envelope[0] = 0x02;
+
+        match decrypt_private_key(&envelope, b"passphrase") {
+            Err(e) => assert!(e.to_string().contains("version")),
+            Ok(_) => panic!("expected an error for an unrecognized envelope version"),
+        }
+    }
+
+    #[test]
+    fn test_decrypt_v1_unrecognized_kdf_algorithm_id() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        envelope[1] = 0xFF;
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_v1_unrecognized_aead_algorithm_id() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        envelope[2] = 0xFF;
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    // Regression test for the Key::<Aes256Gcm>::from_slice panic risk: an
+    // envelope claiming a key_length other than AES_KEY_SIZE must fail
+    // gracefully, not panic.
+    #[test]
+    fn test_decrypt_v1_rejects_mismatched_key_length() {
+        let bad_params = Argon2Params {
+            memory_cost: ARGON2_MEMORY_COST,
+            time_cost: ARGON2_TIME_COST,
+            parallelism: ARGON2_PARALLELISM,
+            key_length: 16,
+        };
+        let envelope =
+            build_v1_envelope_with_fake_ciphertext(&bad_params, COMPOSITE_PRIVATE_KEY_SIZE);
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_v1_rejects_oversized_argon2_memory_cost() {
+        let bad_params = Argon2Params {
+            memory_cost: MAX_ENVELOPE_ARGON2_MEMORY_COST + 1,
+            time_cost: 1,
+            parallelism: 1,
+            key_length: 32,
+        };
+        let envelope =
+            build_v1_envelope_with_fake_ciphertext(&bad_params, COMPOSITE_PRIVATE_KEY_SIZE);
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_v1_rejects_oversized_kdf_params_length_claim() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        // kdf_params_len is the 4 bytes right after the 3 fixed header
+        // bytes; inflate it far past what actually follows.
+        envelope[3..7].copy_from_slice(&(u32::MAX).to_be_bytes());
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_v1_truncated_at_every_offset() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let envelope = build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+
+        for len in 0..envelope.len() {
+            let truncated = &envelope[..len];
+            let result = decrypt_private_key(truncated, b"passphrase");
+            assert!(result.is_err(), "truncation at {} did not fail", len);
+        }
+    }
+
+    #[test]
+    fn test_decrypt_v1_trailing_garbage_rejected() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        envelope.push(0x00);
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_v1_tampered_header_byte_fails() {
+        let composite_key = vec![0x11u8; COMPOSITE_PRIVATE_KEY_SIZE];
+        let mut envelope =
+            build_v1_key_envelope(b"passphrase", &composite_key, &Argon2Params::CURRENT);
+        // Byte 10 falls inside the KDF-params TLV region (which starts at
+        // byte 7, right after the 3 fixed bytes + 4-byte length prefix),
+        // well past the algorithm-id bytes already covered by the tests
+        // above -- proves the AAD covers the whole header, not just its
+        // first few bytes.
+        envelope[10] ^= 0xFF;
+
+        let result = decrypt_private_key(&envelope, b"passphrase");
         assert!(result.is_err());
     }
 }
