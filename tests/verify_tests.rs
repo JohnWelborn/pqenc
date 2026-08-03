@@ -174,15 +174,13 @@ fn test_verify_missing_file() {
 }
 
 #[test]
-fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
-    // Simulates a file encrypted before the checksum trailer existed
-    // (a pre-trailer PQE2, or -- same header shape -- a pre-trailer PQE3):
-    // real `pqenc encrypt` output, with the extension-region trailer marker
-    // and the 32-byte trailer surgically stripped back out. Unlike a
-    // decrypt test, this is valid input for `verify` -- verify never does
-    // any AEAD decryption, so it doesn't care that header_hash no longer
-    // matches what the (untouched) chunk ciphertext was authenticated
-    // against; it only needs the header to remain structurally parseable.
+fn test_verify_rejects_file_missing_checksum_trailer_marker() {
+    // Simulates a file whose extension region never carried the checksum
+    // trailer marker (formerly tolerated for pre-trailer PQE1/PQE2 files;
+    // now that those formats are gone, the marker -- and the trailer it
+    // implies -- is mandatory on every file `verify` accepts): real
+    // `pqenc encrypt` output, with the extension-region trailer marker and
+    // the 32-byte trailer surgically stripped back out.
     let env = TempTestEnv::new();
     let mut bytes = encrypt_bytes(&env, "data.bin", b"some content to verify");
 
@@ -210,18 +208,13 @@ fn test_verify_succeeds_on_pre_trailer_format_file_skipping_checksum() {
 
     let output = run_verify(&path);
     assert!(
-        output.status.success(),
-        "verify should still pass structurally on a pre-trailer file: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "verify should reject a file with no checksum trailer marker"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("skipping checksum") || stdout.contains("No checksum trailer"),
-        "expected output to indicate the checksum check was skipped, not failed: {stdout}"
-    );
-    assert!(
-        stdout.contains("VALID"),
-        "expected a VALID message, got: {stdout}"
+        stderr.contains("checksum trailer"),
+        "expected an error about the missing checksum trailer, got: {stderr}"
     );
 }
 

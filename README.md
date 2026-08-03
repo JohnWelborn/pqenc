@@ -133,10 +133,9 @@ not permanently blocked.
 `pqenc encrypt` always writes the current file format, `PQE3`: plaintext is
 divided into fixed 8 GiB segments, each encrypted under its own independently
 HKDF-derived AES-256-GCM key, so no single key ever encrypts more than 8 GiB
-even for very large backups. `pqenc decrypt` and `pqenc verify` also still
-read the older `PQE1` and `PQE2` formats (one AES-256-GCM key per file)
-exactly as before, for files encrypted by earlier versions of pqenc -- there
-is no need to re-encrypt existing backups.
+even for very large backups. `pqenc decrypt` and `pqenc verify` only accept
+`PQE3`; files encrypted by an older `pqenc` release must be decrypted with
+that older release before upgrading.
 
 ### 4. Check backup integrity without the private key (optional, cron-friendly)
 
@@ -156,9 +155,8 @@ anyone with write access to the file can recompute it after modifying the
 file. `pqenc decrypt`'s AEAD tags are what actually protect against
 tampering, at restore time, when the private key is available.
 
-An older file with no trailer (from before this feature existed, or a `PQE1`
-file) still passes the structural checks; only the checksum comparison is
-skipped, and that's not treated as a failure.
+The checksum trailer is mandatory; a file missing it is rejected outright,
+not silently tolerated.
 
 `pqenc decrypt` also runs this same check itself, automatically, before
 touching the private key — see the next step.
@@ -177,7 +175,7 @@ front rather than partway through decryption.
 `--output` can be omitted: decrypt then restores the original filename (and
 modification/access times) embedded in the encrypted file, falling back to
 stripping a trailing `.pqe` from the input path if no filename was embedded
-(e.g. an older `PQE1` file, or one encrypted from stdin).
+(e.g. one encrypted from stdin).
 
 If preferred, decryption can be performed on an offline or air-gapped machine by transferring the encrypted file there.
 

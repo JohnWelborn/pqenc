@@ -9,7 +9,7 @@ fn pqenc_binary() -> String {
 
 // Note: the test proving a malicious embedded filename (e.g. containing
 // "..") can't cause decrypt to write outside the intended directory lives
-// in src/tests.rs (tests::pqe2_format_tests::test_decrypt_rejects_traversal_in_embedded_filename),
+// in src/tests.rs (tests::pqe3_format_tests::test_decrypt_rejects_traversal_in_embedded_filename),
 // not here. It requires constructing ciphertext with a hostile metadata
 // field value that the real `pqenc encrypt` binary can never produce (the
 // embedded filename always comes from `Path::file_name()`, which never

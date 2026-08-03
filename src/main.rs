@@ -14,55 +14,48 @@
 //!   from ML-KEM secret || X25519 secret, each via its own domain-separated
 //!   info string
 //! - AES-256-GCM: Authenticated encryption with additional data
-//! - Context-binding AAD: Each chunk authenticated with its position and the
-//!   header hash (PQE3 additionally binds the format version and segment
-//!   index -- see below)
+//! - Context-binding AAD: Each chunk authenticated with its position, the
+//!   header hash, the format version, and segment index -- see below
 //! - Zeroization: Automatic clearing of sensitive data from memory
 //! - Chunked encryption: 64KB chunks with unique nonces and authentication
-//! - Segmented rekeying (PQE3): a fresh, independently-derived AES-256-GCM
-//!   key every 8 GiB of plaintext, so no single key ever encrypts more than
+//! - Segmented rekeying: a fresh, independently-derived AES-256-GCM key
+//!   every 8 GiB of plaintext, so no single key ever encrypts more than
 //!   8 GiB regardless of total file size
 //!
 //! # File Format
 //! ```text
-//! [4 bytes: Magic "PQE1", "PQE2", or "PQE3"]
+//! [4 bytes: Magic "PQE3"]
 //! [4 bytes: KEM ciphertext length]
 //! [N bytes: KEM ciphertext]
 //! [32 bytes: ephemeral X25519 public key]
 //! [16 bytes: Salt for HKDF]
 //! [12 bytes: Base nonce]
-//! --- PQE2 and PQE3 only, below this line -- identical shape in both ---
 //! [4 bytes: cleartext extension region length]
 //! [E bytes: cleartext, header-hash-authenticated TLV fields. Forward-compatible:
 //!           unknown field IDs are skipped by their own length prefix, so a
 //!           future field needs no further magic bump. One field defined today:
-//!           field 0x01 (empty value) marks that a 32-byte SHA-256 checksum
-//!           trailer follows the last encrypted chunk (see below)]
+//!           field 0x01 (empty value, required) marks that a 32-byte SHA-256
+//!           checksum trailer follows the last encrypted chunk (see below)]
 //! [4 bytes: encrypted metadata region length]
 //! [M bytes: AEAD-encrypted TLV (original filename, mtime, atime), under a
 //!           key domain-separated from the body key(s)]
-//! [Encrypted chunks with 16-byte authentication tags -- see "PQE3 Segmented
-//!           Body Encryption" below for how PQE3's body differs from PQE1/PQE2's]
-//! [32 bytes: optional SHA-256 checksum trailer, present iff extension field
-//!           0x01 above is present. Covers every preceding byte of the file
-//!           (header through the last chunk) but not itself, computed
+//! [Encrypted chunks with 16-byte authentication tags -- see "Segmented
+//!           Body Encryption" below]
+//! [32 bytes: SHA-256 checksum trailer. Covers every preceding byte of the
+//!           file (header through the last chunk) but not itself, computed
 //!           incrementally during encryption. Not part of the AEAD scheme and
 //!           not authenticated -- a plain checksum for detecting accidental
 //!           corruption (bit rot, truncation, a bad copy) without the private
 //!           key, via `pqenc verify`. Gives no protection against deliberate
 //!           tampering, which the AEAD tags above already catch at decrypt time]
 //! ```
-//! `pqenc decrypt` accepts `PQE1`, `PQE2`, and `PQE3`; `pqenc encrypt` always
-//! writes `PQE3` and always appends the checksum trailer. `PQE1` files, and
-//! `PQE2`/`PQE3` files written before this trailer existed, simply lack it --
-//! absent from the byte stream entirely, not present-but-empty; both
-//! `pqenc decrypt` and `pqenc verify` tolerate its absence.
+//! `pqenc` only ever reads and writes `PQE3`; the checksum trailer is
+//! mandatory on every file.
 //!
-//! # PQE3 Segmented Body Encryption
-//! PQE1 and PQE2 encrypt every body chunk under one AES-256-GCM key for the
-//! whole file. PQE3 instead divides the plaintext into fixed `SEGMENT_SIZE`
-//! (8 GiB) segments -- the final segment may be shorter -- and derives an
-//! independent AES-256-GCM key per segment:
+//! # Segmented Body Encryption
+//! The plaintext is divided into fixed `SEGMENT_SIZE` (8 GiB) segments --
+//! the final segment may be shorter -- and each is encrypted under an
+//! independent AES-256-GCM key:
 //! ```text
 //! segment_key = HKDF-SHA256-Expand(
 //!     PRK = HKDF-Extract(salt, combined_secret),
@@ -77,7 +70,7 @@
 //! of every segment; this is safe *only* because each segment's key is
 //! independent, so the same nonce bytes are never reused under the same key.
 //!
-//! Each PQE3 body chunk's AAD is:
+//! Each body chunk's AAD is:
 //! ```text
 //! [1 byte: format version = 0x03]
 //! [1 byte: chunk_type -- 0x00 normal, 0x01 = final chunk of the *entire
@@ -96,9 +89,8 @@
 //! The passphrase-protected private-key blob -- the entire content of a
 //! `PQENC ENCRYPTED PRIVATE KEY` PEM file, before PEM-wrapping -- is a
 //! small binary envelope with its own version tag, separate from the
-//! `PQE1`/`PQE2`/`PQE3` magic above (that magic versions the encrypted
-//! *file* format; this section is about the encrypted *private key*
-//! format):
+//! `PQE3` magic above (that magic versions the encrypted *file* format;
+//! this section is about the encrypted *private key* format):
 //! ```text
 //! [1 byte:  envelope version = 0x01]
 //! [1 byte:  KDF algorithm id = 0x01 (Argon2id)]
@@ -118,46 +110,18 @@
 //!           the 16-byte GCM tag), AAD-bound to every header byte above so
 //!           header tampering is rejected]
 //! ```
-//! `pqenc generate-keys` always writes this V1 envelope, using whatever
+//! `pqenc generate-keys` always writes this envelope, using whatever
 //! `ARGON2_MEMORY_COST`/`ARGON2_TIME_COST`/`ARGON2_PARALLELISM`/
 //! `ARGON2_KEY_LENGTH` are current at encryption time -- recording them in
 //! the envelope is what lets those defaults change in a later release
 //! without breaking keys already written under the old values.
 //!
-//! Envelopes written before this versioning existed carry no version byte
-//! at all -- just `salt(16) || nonce(12) || ciphertext`, with no recorded
-//! parameters -- and remain decrypt-only, using the Argon2id parameters
-//! and AAD literal frozen at their original hard-coded values
-//! (`Argon2Params::LEGACY`, `KEY_ENVELOPE_AAD_LEGACY`) regardless of what a
-//! later release changes for new keys.
-//!
-//! The two shapes are told apart by *exact byte length*, not by a reserved
-//! version-byte value: every legacy envelope is exactly
-//! `LEGACY_KEY_ENVELOPE_LEN` (3248) bytes, because the plaintext it always
-//! encrypts -- the composite private key -- has a fixed size (fixed-size
-//! ML-KEM-1024 and X25519 secret keys). A reserved first-byte marker
-//! would instead collide with a genuine legacy envelope's random salt
-//! byte about 1 time in 256; the length check is a structural fact, not a
-//! probabilistic guess, and is never ambiguous in either direction (a V1
-//! envelope always carries strictly more header overhead than
-//! `LEGACY_KEY_ENVELOPE_LEN` for the same plaintext size). See
-//! `LEGACY_KEY_ENVELOPE_LEN`'s doc comment for the one corner case this
-//! implies: a corrupted/truncated V1 envelope that happens to land at
-//! exactly 3248 bytes is misrouted into the legacy parser and fails with a
-//! generic error instead of a precise "unrecognized version" one -- always
-//! a safe failure (GCM authentication still rejects it), just a less
-//! specific diagnostic in that one scenario.
-//!
 //! # Accepted Risks
 //! - AES-GCM integrity guarantees degrade beyond ~64 GiB under a single key
-//!   due to birthday-bound limits on the authentication polynomial. PQE3
-//!   resolves this for every file `pqenc encrypt` writes from here on: each
-//!   segment is independently keyed and at most 8 GiB, comfortably inside the
-//!   safe bound, regardless of total file size. `PQE1`/`PQE2` files remain
-//!   decrypt-only and still carry the original per-file caveat -- beyond
-//!   ~64 GiB under one key, attackers with significant resources may have
-//!   increased (though still negligible) success forging authentication tags
-//!   to modify ciphertext undetected. Encryption itself remains strong.
+//!   due to birthday-bound limits on the authentication polynomial. Every
+//!   segment is independently keyed and at most 8 GiB, comfortably inside
+//!   the safe bound, regardless of total file size, so this does not apply
+//!   to any file `pqenc` produces or reads.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
@@ -184,17 +148,14 @@ const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
 // Size of the optional SHA-256 checksum trailer appended after the last
 // encrypted chunk -- see EXTENSION_FIELD_CHECKSUM_TRAILER below.
 const TRAILER_SIZE: usize = 32;
-const MAGIC_V1: &[u8] = b"PQE1";
-const MAGIC_V2: &[u8] = b"PQE2";
 const MAGIC_V3: &[u8] = b"PQE3";
 
-// PQE3 body segmentation. Plaintext is divided into fixed SEGMENT_SIZE
-// segments (the final segment may be shorter), each encrypted under its own
+// Body segmentation. Plaintext is divided into fixed SEGMENT_SIZE segments
+// (the final segment may be shorter), each encrypted under its own
 // AES-256-GCM key derived via derive_body_key_v3 -- so no single key ever
 // encrypts more than SEGMENT_SIZE, regardless of total file size. This is
 // what resolves the AES-GCM per-key data-limit concern noted in "Accepted
-// Risks" below for every file `pqenc encrypt` writes from here on (PQE1/PQE2
-// files, decrypt-only from here on, still carry the original caveat).
+// Risks" below.
 //
 // CHUNK_SIZE evenly divides SEGMENT_SIZE (enforced below), so a segment
 // boundary always lands exactly on a chunk edge and no chunk ever spans two
@@ -208,7 +169,7 @@ const _: () = assert!(
 
 // Reservation-placeholder marker and staleness threshold for
 // claim_output_and_temp's reclaim logic (TODO.md #1). Deliberately does not
-// start with MAGIC_V1/MAGIC_V2 above, so it can never be mistaken for real
+// start with MAGIC_V3 above, so it can never be mistaken for real
 // ciphertext by anything, including this tool, that inspects the file.
 const RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
 
@@ -229,15 +190,15 @@ const RESERVATION_STALE_AGE: std::time::Duration = std::time::Duration::from_sec
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 
-// Explicit format-version tag bound into every PQE3 body-chunk AAD (see
+// Explicit format-version tag bound into every body-chunk AAD (see
 // build_aad_v3), on top of header_hash already covering the header's magic
-// bytes -- belt-and-suspenders against ever confusing a PQE3 chunk AAD with
-// PQE1/PQE2's build_aad (41 bytes) or the metadata region's build_metadata_aad
-// (33 bytes): build_aad_v3 is 50 bytes, a length none of the others share.
+// bytes -- belt-and-suspenders against ever confusing a body chunk AAD with
+// the metadata region's build_metadata_aad (33 bytes): build_aad_v3 is 50
+// bytes, a length that never collides with it.
 const AAD_VERSION_V3: u8 = 0x03;
 
-// PQE2/PQE3 header regions (identical shape in both formats). Both length
-// prefixes are attacker-controlled before validation, so each region has a
+// Header regions after base_nonce. Both length prefixes are
+// attacker-controlled before validation, so each region has a
 // generous-but-bounded cap to prevent an oversized length claim from driving
 // a huge allocation on read — same role as MAX_KEM_CIPHERTEXT_SIZE above.
 const MAX_EXTENSION_REGION_SIZE: usize = 65536;
@@ -249,15 +210,15 @@ const MAX_METADATA_CIPHERTEXT_SIZE: usize = MAX_METADATA_PLAINTEXT_SIZE + TAG_SI
 // the key-level separation from METADATA_KEY_INFO below.
 const AAD_CHUNK_TYPE_METADATA: u8 = 0x02;
 
-// Metadata TLV field IDs (PQE2/PQE3 encrypted region only). Unrecognized IDs
-// are skipped, not rejected -- see parse_tlv_fields -- so new fields can be
+// Metadata TLV field IDs (encrypted region only). Unrecognized IDs are
+// skipped, not rejected -- see parse_tlv_fields -- so new fields can be
 // added later without another format-version bump.
 const METADATA_FIELD_FILENAME: u8 = 0x01;
 const METADATA_FIELD_MTIME: u8 = 0x02;
 const METADATA_FIELD_ATIME: u8 = 0x03;
 
-// Cleartext extension TLV field IDs (PQE2/PQE3 extension region only) -- a
-// separate namespace from the metadata-region field IDs above, since they're
+// Cleartext extension TLV field IDs (extension region only) -- a separate
+// namespace from the metadata-region field IDs above, since they're
 // different regions. Presence of this field (value must be empty) means a
 // 32-byte SHA-256 checksum trailer (TRAILER_SIZE) follows the last encrypted
 // chunk -- see the "# File Format" doc comment above and `pqenc verify`.
@@ -268,14 +229,12 @@ const EXTENSION_FIELD_CHECKSUM_TRAILER: u8 = 0x01;
 /// so encode/decode need no unit conversion.
 const TIMESTAMP_FIELD_SIZE: usize = 12;
 
-const AES_KEY_INFO: &[u8] = b"pqenc-hybrid-aes-key";
 const METADATA_KEY_INFO: &[u8] = b"pqenc-hybrid-metadata-key";
 
-// PQE3 per-segment body key HKDF info prefix. The full info value is this
-// prefix followed by the 8-byte big-endian segment index (see
-// derive_body_key_v3) -- distinct from AES_KEY_INFO (PQE1/PQE2's single
-// whole-file body key) so a PQE3 segment key can never collide with a
-// PQE1/PQE2 body key even if combined_secret/salt were ever reused (they
+// Per-segment body key HKDF info prefix. The full info value is this prefix
+// followed by the 8-byte big-endian segment index (see derive_body_key_v3),
+// distinct from METADATA_KEY_INFO so a segment key can never collide with
+// the metadata key even if combined_secret/salt were ever reused (they
 // never are: both are freshly random per encryption).
 const AES_KEY_INFO_V3_PREFIX: &[u8] = b"pqenc-pqe3-body-key";
 
@@ -312,8 +271,8 @@ const PBE_NONCE_SIZE: usize = 12;
 
 // Private-key envelope format tags (see "Private-Key Envelope Format" doc
 // comment above and decrypt_private_key below). A separate version space
-// from MAGIC_V1/V2/V3 above -- those version the encrypted *file* format,
-// these version the encrypted *private key* format.
+// from MAGIC_V3 above -- that versions the encrypted *file* format, these
+// version the encrypted *private key* format.
 const KEY_ENVELOPE_VERSION_V1: u8 = 0x01;
 const KDF_ALG_ARGON2ID: u8 = 0x01;
 const AEAD_ALG_AES_256_GCM: u8 = 0x01;
@@ -337,39 +296,17 @@ const MAX_ENVELOPE_ARGON2_MEMORY_COST: u32 = 4 * 1024 * 1024; // KiB (4 GiB)
 const MAX_ENVELOPE_ARGON2_TIME_COST: u32 = 100;
 const MAX_ENVELOPE_ARGON2_PARALLELISM: u32 = 256;
 
-// AAD literals for the two envelope shapes decrypt_private_key accepts.
-// KEY_ENVELOPE_AAD_LEGACY must never change: it's byte-for-byte what every
-// already-existing legacy private key was encrypted under.
-const KEY_ENVELOPE_AAD_LEGACY: &[u8] = b"pqenc-private-key-v1";
+// AAD literal for the envelope shape decrypt_private_key accepts.
 const KEY_ENVELOPE_AAD_V1_PREFIX: &[u8] = b"pqenc-private-key-envelope-v1";
 
 // Size of the composite private key plaintext this tool has always produced
 // ([4-byte len][ML-KEM-1024 secret key][X25519 secret key]) -- fixed
-// because both key sizes are fixed by their respective schemes.
+// because both key sizes are fixed by their respective schemes. Test-only:
+// production code never needs this size as a value (the plaintext is
+// whatever `encrypt_private_key` is handed), but test fixtures use it to
+// build correctly-sized composite keys.
+#[cfg(test)]
 const COMPOSITE_PRIVATE_KEY_SIZE: usize = 4 + MLKEM1024_PRIVATE_KEY_SIZE + X25519_PRIVATE_KEY_SIZE;
-
-// Exact byte length of every private-key envelope this tool wrote before
-// this format-versioning change (salt || nonce || ciphertext, ciphertext
-// being COMPOSITE_PRIVATE_KEY_SIZE plaintext + TAG_SIZE). decrypt_private_key
-// uses this exact length -- not a reserved version-byte value -- to tell a
-// legacy envelope apart from a new (versioned) one: see the "Private-Key
-// Envelope Format" doc comment above for why a length check is the safe
-// discriminator here. A reserved first-byte marker would collide with a
-// genuine legacy salt byte about 1 time in 256, since a legacy envelope's
-// first byte is uniformly random; this length is instead a structural fact
-// about the fixed-size plaintext, never ambiguous.
-const LEGACY_KEY_ENVELOPE_LEN: usize =
-    ARGON2_SALT_SIZE + PBE_NONCE_SIZE + COMPOSITE_PRIVATE_KEY_SIZE + TAG_SIZE;
-
-// Argon2id parameters implied by every legacy (unversioned) envelope,
-// frozen exactly at today's ARGON2_* values above. decrypt_private_key's
-// legacy path must use these, never ARGON2_MEMORY_COST/etc, so that raising
-// the latter for new keys -- the whole point of this format change -- can
-// never change what parameters a legacy key is decrypted with.
-const LEGACY_ARGON2_MEMORY_COST: u32 = 65536;
-const LEGACY_ARGON2_TIME_COST: u32 = 3;
-const LEGACY_ARGON2_PARALLELISM: u32 = 4;
-const LEGACY_ARGON2_KEY_LENGTH: u32 = 32;
 
 // PEM headers
 const PEM_PUB_BEGIN: &str = "-----BEGIN PQENC PUBLIC KEY-----";
@@ -649,9 +586,9 @@ fn pem_decode(pem_text: &str, begin: &str, end: &str) -> Result<Vec<u8>> {
         .context("Failed to decode base64")
 }
 
-/// Argon2id parameters an envelope records (V1) or implies (Legacy) --
-/// everything `derive_key_from_passphrase` needs beyond the salt and
-/// passphrase itself.
+/// Argon2id parameters a V1 envelope records -- everything
+/// `derive_key_from_passphrase` needs beyond the salt and passphrase
+/// itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Argon2Params {
     memory_cost: u32,
@@ -661,7 +598,7 @@ struct Argon2Params {
 }
 
 impl Argon2Params {
-    /// Parameters used for newly-written V1 envelopes -- tracks `ARGON2_*`
+    /// Parameters used for newly-written envelopes -- tracks `ARGON2_*`
     /// above, so a future hardening bump there flows into new keys
     /// automatically without touching this struct.
     const CURRENT: Argon2Params = Argon2Params {
@@ -669,15 +606,6 @@ impl Argon2Params {
         time_cost: ARGON2_TIME_COST,
         parallelism: ARGON2_PARALLELISM,
         key_length: ARGON2_KEY_LENGTH as u32,
-    };
-
-    /// Parameters implied by every legacy envelope -- frozen, see
-    /// `LEGACY_ARGON2_*` above.
-    const LEGACY: Argon2Params = Argon2Params {
-        memory_cost: LEGACY_ARGON2_MEMORY_COST,
-        time_cost: LEGACY_ARGON2_TIME_COST,
-        parallelism: LEGACY_ARGON2_PARALLELISM,
-        key_length: LEGACY_ARGON2_KEY_LENGTH,
     };
 }
 
@@ -814,7 +742,7 @@ fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8
 }
 
 /// Reads and advances past the next `n` bytes of `data`, starting at
-/// `*pos`. Small cursor helper for `decrypt_private_key_v1`'s sequential,
+/// `*pos`. Small cursor helper for `decrypt_private_key`'s sequential,
 /// bounds-checked parse -- mirrors `parse_tlv_fields`'s own manual
 /// bounds-checking style.
 fn take_bytes<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8]> {
@@ -826,45 +754,7 @@ fn take_bytes<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8]>
     Ok(slice)
 }
 
-/// Decrypt private key with passphrase. Dispatches on exact envelope
-/// length -- see `LEGACY_KEY_ENVELOPE_LEN`'s doc comment and the
-/// "Private-Key Envelope Format" module doc section for why length, not a
-/// version-byte marker, is what tells a legacy envelope apart from a V1
-/// one here.
-fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
-    if encrypted_blob.len() == LEGACY_KEY_ENVELOPE_LEN {
-        decrypt_private_key_legacy(encrypted_blob, passphrase)
-    } else {
-        decrypt_private_key_v1(encrypted_blob, passphrase)
-    }
-}
-
-/// Decrypts a pre-versioning envelope: `salt(16) || nonce(12) ||
-/// ciphertext`, no version tag, always exactly `LEGACY_KEY_ENVELOPE_LEN`
-/// bytes. Parameters and AAD are frozen at their original values forever --
-/// see `Argon2Params::LEGACY` and `KEY_ENVELOPE_AAD_LEGACY`.
-fn decrypt_private_key_legacy(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
-    let salt = &encrypted_blob[..ARGON2_SALT_SIZE];
-    let nonce = &encrypted_blob[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + PBE_NONCE_SIZE];
-    let ciphertext = &encrypted_blob[ARGON2_SALT_SIZE + PBE_NONCE_SIZE..];
-
-    let key = derive_key_from_passphrase(passphrase, salt, &Argon2Params::LEGACY)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
-
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad: KEY_ENVELOPE_AAD_LEGACY,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("Decryption failed - wrong passphrase or corrupted key"))?;
-
-    Ok(SensitiveData::new(plaintext))
-}
-
-/// Decrypts a versioned (V1) envelope -- see the "Private-Key Envelope
+/// Decrypts a V1 private key envelope -- see the "Private-Key Envelope
 /// Format" module doc section for the byte layout. Every length-prefixed
 /// field is bounds-checked before use, and every parsed Argon2 parameter is
 /// validated before being handed to Argon2/AES-GCM: an out-of-range
@@ -872,7 +762,7 @@ fn decrypt_private_key_legacy(encrypted_blob: &[u8], passphrase: &[u8]) -> Resul
 /// rather than fail gracefully, and an out-of-range memory/time cost could
 /// make decrypting a corrupted envelope hang for an attacker-chosen amount
 /// of time before even attempting the passphrase.
-fn decrypt_private_key_v1(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
+fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<SensitiveData> {
     let mut pos = 0usize;
 
     let version = take_bytes(encrypted_blob, &mut pos, 1)?[0];
@@ -1500,30 +1390,14 @@ fn generate_keys(
     Ok(())
 }
 
-/// Derives an AES-256 key from a combined secret using HKDF-SHA256.
-///
-/// Uses HKDF with the provided salt and info string AES_KEY_INFO to derive
-/// a 32-byte key suitable for AES-256-GCM.
-/// The combined secret should be 64 bytes (32 from ML-KEM + 32 from X25519).
-fn derive_aes_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> {
-    if combined_secret.len() != SHARED_SECRET_SIZE {
-        bail!("Combined secret must be {} bytes", SHARED_SECRET_SIZE);
-    }
-    let hkdf = Hkdf::<Sha256>::new(Some(salt), combined_secret);
-    let mut okm = vec![0u8; AES_KEY_SIZE];
-    hkdf.expand(AES_KEY_INFO, &mut okm)
-        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {}", e))?;
-    Ok(SensitiveData::new(okm))
-}
-
-/// Derives the PQE2/PQE3 metadata region's AES-256 key (both formats share
-/// this same mechanism) from the same combined secret and salt as
-/// `derive_aes_key`, domain-separated by info string alone (METADATA_KEY_INFO
-/// vs AES_KEY_INFO, and -- for PQE3 -- vs AES_KEY_INFO_V3_PREFIX). This
-/// independence is what makes it safe for the metadata region to reuse
-/// `base_nonce` directly as its AEAD nonce rather than deriving a fresh one:
-/// none of these keys can ever collide, and the metadata key is used for
-/// exactly one AEAD call per encryption run.
+/// Derives the metadata region's AES-256 key from the combined secret and
+/// salt via HKDF-SHA256, domain-separated by info string alone
+/// (METADATA_KEY_INFO vs AES_KEY_INFO_V3_PREFIX). This independence is what
+/// makes it safe for the metadata region to reuse `base_nonce` directly as
+/// its AEAD nonce rather than deriving a fresh one: the two keys can never
+/// collide, and the metadata key is used for exactly one AEAD call per
+/// encryption run. The combined secret should be 64 bytes (32 from ML-KEM +
+/// 32 from X25519).
 fn derive_metadata_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveData> {
     if combined_secret.len() != SHARED_SECRET_SIZE {
         bail!("Combined secret must be {} bytes", SHARED_SECRET_SIZE);
@@ -1535,12 +1409,12 @@ fn derive_metadata_key(combined_secret: &[u8], salt: &[u8]) -> Result<SensitiveD
     Ok(SensitiveData::new(okm))
 }
 
-/// Derives the AES-256-GCM key for one PQE3 body segment from the same
-/// combined secret and salt as `derive_aes_key`/`derive_metadata_key`, but
-/// with a distinct, domain-separated HKDF info value that also folds in the
-/// segment index: `AES_KEY_INFO_V3_PREFIX || segment_index (8 bytes BE)`.
-/// Every segment index therefore yields an independent key -- this is the
-/// entire mechanism that lets PQE3 safely reuse `base_nonce` (via
+/// Derives the AES-256-GCM key for one body segment from the same combined
+/// secret and salt as `derive_metadata_key`, but with a distinct,
+/// domain-separated HKDF info value that also folds in the segment index:
+/// `AES_KEY_INFO_V3_PREFIX || segment_index (8 bytes BE)`. Every segment
+/// index therefore yields an independent key -- this is the entire
+/// mechanism that lets body encryption safely reuse `base_nonce` (via
 /// `get_nonce`) starting from 0 in every segment: the (key, nonce) pair as a
 /// whole is never repeated even though nonce bytes are.
 fn derive_body_key_v3(
@@ -1604,25 +1478,7 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     Ok(*Nonce::from_slice(&nonce_bytes))
 }
 
-/// Builds Additional Authenticated Data (AAD) for AEAD encryption.
-///
-/// Binds the following context to each encrypted chunk:
-/// - chunk_type: 1 byte (0x00 for normal chunk, 0x01 for last chunk)
-/// - chunk_index: 8 bytes (u64 big-endian position)
-/// - header_hash: 32 bytes (SHA256 of file header)
-///
-/// This improves misuse resistance by cryptographically binding each chunk
-/// to its position and the encryption parameters, preventing chunk reordering,
-/// header substitution, and other format-level attacks.
-fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 41] {
-    let mut aad = [0u8; 41];
-    aad[0] = chunk_type;
-    aad[1..9].copy_from_slice(&chunk_index.to_be_bytes());
-    aad[9..41].copy_from_slice(header_hash);
-    aad
-}
-
-/// Builds Additional Authenticated Data for a PQE3 body chunk.
+/// Builds Additional Authenticated Data for a body chunk.
 ///
 /// Binds:
 /// - version: 1 byte (AAD_VERSION_V3), explicit even though `header_hash`
@@ -1638,8 +1494,8 @@ fn build_aad(chunk_type: u8, chunk_index: u64, header_hash: &[u8; 32]) -> [u8; 4
 /// local_chunk_index binds it to its position within that segment, together
 /// preventing chunk reordering and cross-segment cut-and-paste; header_hash
 /// prevents header substitution. Deliberately 50 bytes -- a length distinct
-/// from both `build_aad`'s 41 and `build_metadata_aad`'s 33, so the three
-/// AAD "channels" can never be confused even by byte length alone.
+/// from `build_metadata_aad`'s 33, so the two AAD "channels" can never be
+/// confused even by byte length alone.
 fn build_aad_v3(
     chunk_type: u8,
     segment_index: u64,
@@ -1682,15 +1538,14 @@ fn segment_and_local_chunk_index(
     Ok((segment_index, local_chunk_index))
 }
 
-/// Builds the AAD for the PQE2/PQE3 metadata region's single AEAD call
-/// (shared by both formats): `[AAD_CHUNK_TYPE_METADATA(1)] || prefix_hash(32)`.
-/// `prefix_hash` is the SHA256 of the header's fixed-position prefix (magic
-/// through base_nonce), computed before the metadata ciphertext exists --
-/// unlike `header_hash`, which covers the *entire* header including the
-/// metadata ciphertext and so cannot be computed until after this AEAD call
-/// has already happened. Deliberately a different length (33 bytes) than
-/// `build_aad`'s 41 and `build_aad_v3`'s 50, so all three AAD "channels" can
-/// never be confused even by byte length alone.
+/// Builds the AAD for the metadata region's single AEAD call:
+/// `[AAD_CHUNK_TYPE_METADATA(1)] || prefix_hash(32)`. `prefix_hash` is the
+/// SHA256 of the header's fixed-position prefix (magic through base_nonce),
+/// computed before the metadata ciphertext exists -- unlike `header_hash`,
+/// which covers the *entire* header including the metadata ciphertext and
+/// so cannot be computed until after this AEAD call has already happened.
+/// Deliberately a different length (33 bytes) than `build_aad_v3`'s 50, so
+/// the two AAD "channels" can never be confused even by byte length alone.
 fn build_metadata_aad(prefix_hash: &[u8; 32]) -> [u8; 33] {
     let mut aad = [0u8; 33];
     aad[0] = AAD_CHUNK_TYPE_METADATA;
@@ -1699,8 +1554,8 @@ fn build_metadata_aad(prefix_hash: &[u8; 32]) -> [u8; 33] {
 }
 
 /// Encodes `[field_id:1][len:4 BE][value:len]` entries back to back.
-/// Used for both the PQE2/PQE3 cleartext extension region and the metadata
-/// region's plaintext (before AEAD encryption, in the latter case).
+/// Used for both the cleartext extension region and the metadata region's
+/// plaintext (before AEAD encryption, in the latter case).
 fn encode_tlv_fields(fields: &[(u8, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
     for (field_id, value) in fields {
@@ -1754,9 +1609,8 @@ fn decode_timestamp(bytes: &[u8]) -> Result<filetime::FileTime> {
 }
 
 /// Original-file metadata captured at encrypt time, embedded (encrypted) in
-/// the metadata region (PQE2/PQE3 -- `pqenc encrypt` always writes PQE3
-/// today). `None` for stdin input -- there's no real filename or timestamps
-/// to capture from a stream.
+/// the metadata region. `None` for stdin input -- there's no real filename
+/// or timestamps to capture from a stream.
 struct SourceMetadata {
     filename: Option<String>,
     mtime: filetime::FileTime,
@@ -1782,7 +1636,7 @@ fn encode_metadata_plaintext(source: Option<&SourceMetadata>) -> Vec<u8> {
     encode_tlv_fields(&fields)
 }
 
-/// Parsed PQE2/PQE3 metadata region. `filename` is the RAW, unsanitized,
+/// Parsed metadata region. `filename` is the RAW, unsanitized,
 /// potentially attacker-influenced string as embedded by whoever encrypted
 /// the file -- callers MUST run it through `sanitize_embedded_filename`
 /// before ever using it as a path component.
@@ -1873,8 +1727,8 @@ fn resolve_encrypt_output(input_path: &str, output: Option<String>) -> Result<St
 ///   (c) an error asking for an explicit `--output`.
 ///
 /// `embedded_filename` is the RAW metadata field value (or `None` for a
-/// PQE1 input, a stdin-sourced encryption, or a PQE2/PQE3 file whose
-/// metadata omitted the field) -- sanitized internally, never used verbatim.
+/// stdin-sourced encryption, or a file whose metadata omitted the field) --
+/// sanitized internally, never used verbatim.
 /// If sanitization rejects it, this falls through to (b) rather than
 /// failing outright, since the field is attacker-influenced and shouldn't
 /// be able to force a hard failure a plain `.pqe`-suffixed name would have
@@ -2008,50 +1862,29 @@ fn is_stale_reservation_placeholder(path: &str) -> bool {
 }
 
 /// Supplies the AES-256-GCM cipher, nonce, and AAD to use for one body
-/// chunk, unifying the two schemes PQE1/PQE2/PQE3 need so neither
-/// `encrypt_file_with_segment_size`'s nor `decrypt_file_with_segment_size`'s
-/// chunk loop has to branch on format version itself:
-///
-/// - `Fixed`: PQE1/PQE2's scheme -- one AES-256-GCM key for the whole file.
-///   Only ever constructed by `decrypt_file_with_segment_size` (encrypt
-///   never writes PQE1/PQE2). Reproduces `build_aad`/`get_nonce` exactly as
-///   used before this type existed, keyed directly on the global chunk
-///   index.
-/// - `Segmented`: PQE3's scheme -- an independent key per `chunks_per_segment`
-///   chunks (see `derive_body_key_v3`), lazily derived and cached, since
-///   both loops process chunks in strictly increasing global-index order
-///   (so a segment's key is derived at most once, the first time that
-///   segment is entered). Nonces reset to `get_nonce(base_nonce,
-///   local_chunk_index)` (starting back at 0) at every segment boundary --
-///   safe only because `combined_secret` retained here means every
-///   segment's key is independent, so the (key, nonce) pair as a whole is
-///   never reused even though nonce bytes are. `combined_secret` is held as
-///   `SensitiveData` for exactly as long as body encryption/decryption
-///   needs it and is zeroized via `ZeroizeOnDrop` whenever this value
-///   drops, on every exit path (including a `?` mid-loop).
-enum BodyCipherProvider {
-    Fixed {
-        cipher: Aes256Gcm,
-    },
-    Segmented {
-        combined_secret: SensitiveData,
-        salt: [u8; SALT_SIZE],
-        chunks_per_segment: u64,
-        cached_segment: Option<(u64, Aes256Gcm)>,
-    },
+/// chunk: an independent key per `chunks_per_segment` chunks (see
+/// `derive_body_key_v3`), lazily derived and cached, since both
+/// `encrypt_file_with_segment_size`'s and `decrypt_file_with_segment_size`'s
+/// chunk loops process chunks in strictly increasing global-index order (so
+/// a segment's key is derived at most once, the first time that segment is
+/// entered). Nonces reset to `get_nonce(base_nonce, local_chunk_index)`
+/// (starting back at 0) at every segment boundary -- safe only because
+/// `combined_secret` retained here means every segment's key is
+/// independent, so the (key, nonce) pair as a whole is never reused even
+/// though nonce bytes are. `combined_secret` is held as `SensitiveData` for
+/// exactly as long as body encryption/decryption needs it and is zeroized
+/// via `ZeroizeOnDrop` whenever this value drops, on every exit path
+/// (including a `?` mid-loop).
+struct BodyCipherProvider {
+    combined_secret: SensitiveData,
+    salt: [u8; SALT_SIZE],
+    chunks_per_segment: u64,
+    cached_segment: Option<(u64, Aes256Gcm)>,
 }
 
 impl BodyCipherProvider {
-    fn fixed(cipher: Aes256Gcm) -> Self {
-        BodyCipherProvider::Fixed { cipher }
-    }
-
-    fn segmented(
-        combined_secret: SensitiveData,
-        salt: [u8; SALT_SIZE],
-        chunks_per_segment: u64,
-    ) -> Self {
-        BodyCipherProvider::Segmented {
+    fn new(combined_secret: SensitiveData, salt: [u8; SALT_SIZE], chunks_per_segment: u64) -> Self {
+        BodyCipherProvider {
             combined_secret,
             salt,
             chunks_per_segment,
@@ -2060,9 +1893,9 @@ impl BodyCipherProvider {
     }
 
     /// Returns `(cipher, nonce, aad)` for the chunk at `global_chunk_index`.
-    /// `chunk_type` is computed identically by both callers regardless of
-    /// variant: `AAD_CHUNK_TYPE_LAST` iff this is the true final chunk of
-    /// the entire file (never merely the final chunk of a segment).
+    /// `chunk_type` is `AAD_CHUNK_TYPE_LAST` iff this is the true final
+    /// chunk of the entire file (never merely the final chunk of a
+    /// segment).
     fn params_for(
         &mut self,
         global_chunk_index: u64,
@@ -2070,45 +1903,33 @@ impl BodyCipherProvider {
         header_hash: &[u8; 32],
         base_nonce: &[u8; NONCE_SIZE],
     ) -> Result<(&Aes256Gcm, Nonce<U12>, Vec<u8>)> {
-        match self {
-            BodyCipherProvider::Fixed { cipher } => {
-                let aad = build_aad(chunk_type, global_chunk_index, header_hash);
-                let nonce = get_nonce(base_nonce, global_chunk_index)?;
-                Ok((&*cipher, nonce, aad.to_vec()))
-            }
-            BodyCipherProvider::Segmented {
-                combined_secret,
-                salt,
-                chunks_per_segment,
-                cached_segment,
-            } => {
-                let (segment_index, local_chunk_index) =
-                    segment_and_local_chunk_index(global_chunk_index, *chunks_per_segment)?;
+        let (segment_index, local_chunk_index) =
+            segment_and_local_chunk_index(global_chunk_index, self.chunks_per_segment)?;
 
-                // Transient immutable reborrow, collapsed to a bool before
-                // any mutation happens below -- never overlaps with the
-                // `&mut` reborrow that follows, so this satisfies the
-                // borrow checker without `unsafe` or a second lookup.
-                let needs_new_key = cached_segment
-                    .as_ref()
-                    .map(|(cached_index, _)| *cached_index != segment_index)
-                    .unwrap_or(true);
+        // Transient immutable reborrow, collapsed to a bool before any
+        // mutation happens below -- never overlaps with the `&mut` reborrow
+        // that follows, so this satisfies the borrow checker without
+        // `unsafe` or a second lookup.
+        let needs_new_key = self
+            .cached_segment
+            .as_ref()
+            .map(|(cached_index, _)| *cached_index != segment_index)
+            .unwrap_or(true);
 
-                if needs_new_key {
-                    let key = derive_body_key_v3(&combined_secret.data, &salt[..], segment_index)?;
-                    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
-                    *cached_segment = Some((segment_index, cipher));
-                    // `key` (SensitiveData) drops here and zeroizes its raw
-                    // bytes -- the AES round-key schedule already expanded
-                    // into `cipher` no longer needs them.
-                }
-                let cipher = &cached_segment.as_ref().unwrap().1;
-
-                let aad = build_aad_v3(chunk_type, segment_index, local_chunk_index, header_hash);
-                let nonce = get_nonce(base_nonce, local_chunk_index)?;
-                Ok((cipher, nonce, aad.to_vec()))
-            }
+        if needs_new_key {
+            let key =
+                derive_body_key_v3(&self.combined_secret.data, &self.salt[..], segment_index)?;
+            let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+            self.cached_segment = Some((segment_index, cipher));
+            // `key` (SensitiveData) drops here and zeroizes its raw bytes --
+            // the AES round-key schedule already expanded into `cipher` no
+            // longer needs them.
         }
+        let cipher = &self.cached_segment.as_ref().unwrap().1;
+
+        let aad = build_aad_v3(chunk_type, segment_index, local_chunk_index, header_hash);
+        let nonce = get_nonce(base_nonce, local_chunk_index)?;
+        Ok((cipher, nonce, aad.to_vec()))
     }
 }
 
@@ -2129,7 +1950,7 @@ fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> R
 ///    and encrypts them into the header's metadata region
 /// 5. Encrypts the file in 64KB chunks using AES-256-GCM, rekeying to a fresh,
 ///    independently HKDF-derived key every `chunks_per_segment` chunks (see
-///    `BodyCipherProvider::Segmented`)
+///    `BodyCipherProvider`)
 /// 6. Writes encrypted output with header containing KEM ciphertext, X25519 public
 ///    key, salt, base nonce, and the extension/metadata regions
 /// 7. Streams into a sibling temp file and renames it into place, so a failed
@@ -2213,9 +2034,9 @@ fn encrypt_file_with_segment_size(
 
     // Combine secrets (64 bytes). Wrapped in SensitiveData immediately so
     // every exit path below -- including a `?` early return, before it's
-    // ever moved into BodyCipherProvider::Segmented -- zeroizes it via
-    // ZeroizeOnDrop, rather than relying on a manual `.zeroize()` call that
-    // only ran on a specific success path.
+    // ever moved into BodyCipherProvider -- zeroizes it via ZeroizeOnDrop,
+    // rather than relying on a manual `.zeroize()` call that only ran on a
+    // specific success path.
     let mut combined_secret_bytes = Vec::with_capacity(SHARED_SECRET_SIZE);
     combined_secret_bytes.extend_from_slice(kem_secret_guard.data.as_slice());
     combined_secret_bytes.extend_from_slice(shared_secret_x25519.as_bytes());
@@ -2341,8 +2162,7 @@ fn encrypt_file_with_segment_size(
     // segment's key lazily as the loop below reaches it; now zeroizes
     // whenever body_provider drops (the end of this function, on every
     // exit path, including a `?` mid-loop).
-    let mut body_provider =
-        BodyCipherProvider::segmented(combined_secret, salt, chunks_per_segment);
+    let mut body_provider = BodyCipherProvider::new(combined_secret, salt, chunks_per_segment);
 
     let mut chunk_index: u64 = 0;
 
@@ -2447,36 +2267,9 @@ fn encrypt_file_with_segment_size(
     Ok(())
 }
 
-/// The three formats `pqenc decrypt`/`pqenc verify` accept. `pqenc encrypt`
-/// always writes `V3`; `V1`/`V2` are decrypt-only, preserved exactly.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PqeVersion {
-    V1,
-    V2,
-    V3,
-}
-
-impl PqeVersion {
-    fn label(&self) -> &'static str {
-        match self {
-            PqeVersion::V1 => "PQE1",
-            PqeVersion::V2 => "PQE2",
-            PqeVersion::V3 => "PQE3",
-        }
-    }
-
-    /// True for the two formats that carry the cleartext extension region
-    /// and encrypted metadata region after `base_nonce` (V1 has neither).
-    fn has_extended_header(&self) -> bool {
-        matches!(self, PqeVersion::V2 | PqeVersion::V3)
-    }
-}
-
 /// Result of `parse_header`: everything decrypt_file/verify_file need from
-/// the structural-only (no key material required) part of a PQE1/PQE2/PQE3
-/// file.
+/// the structural-only (no key material required) part of a PQE3 file.
 struct ParsedHeader {
-    version: PqeVersion,
     header_bytes: Vec<u8>,
     header_hash: [u8; 32],
     prefix_hash: [u8; 32],
@@ -2485,19 +2278,14 @@ struct ParsedHeader {
     salt: [u8; SALT_SIZE],
     base_nonce: [u8; NONCE_SIZE],
     metadata_ciphertext: Vec<u8>,
-    has_trailer: bool,
 }
 
-/// Parses and structurally validates a PQE1/PQE2/PQE3 header: magic bytes,
-/// length-prefixed fields, and (PQE2/PQE3 only) the cleartext extension
-/// region and encrypted metadata region -- every check that doesn't require
-/// the private key. Shared by `decrypt_file` and `verify_file` so this logic
+/// Parses and structurally validates a PQE3 header: magic bytes,
+/// length-prefixed fields, the cleartext extension region, and the
+/// encrypted metadata region -- every check that doesn't require the
+/// private key. Shared by `decrypt_file` and `verify_file` so this logic
 /// (including the bounds checks on attacker-controlled length prefixes)
 /// has exactly one implementation instead of two that can drift apart.
-///
-/// PQE2 and PQE3 share an identical header shape (only the magic and the
-/// body-chunk encryption scheme differ), so both are parsed by the same
-/// `has_extended_header()` branch below.
 ///
 /// Leaves `fin` positioned immediately after the header, at the start of
 /// the encrypted chunk body.
@@ -2506,15 +2294,9 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
 
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
-    let version = if magic == MAGIC_V1 {
-        PqeVersion::V1
-    } else if magic == MAGIC_V2 {
-        PqeVersion::V2
-    } else if magic == MAGIC_V3 {
-        PqeVersion::V3
-    } else {
+    if magic != MAGIC_V3 {
         bail!("Invalid file format or version");
-    };
+    }
 
     let mut len_bytes = [0u8; 4];
     fin.read_exact(&mut len_bytes)?;
@@ -2550,56 +2332,54 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
     // any) is read, exactly mirroring how encrypt_file computes it.
     let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
 
-    let mut metadata_ciphertext: Vec<u8> = Vec::new();
+    let mut ext_len_bytes = [0u8; 4];
+    fin.read_exact(&mut ext_len_bytes)?;
+    let ext_len = u32::from_be_bytes(ext_len_bytes) as usize;
+    if ext_len > MAX_EXTENSION_REGION_SIZE {
+        bail!("Invalid extension region length: {}", ext_len);
+    }
+    let mut extension_region = vec![0u8; ext_len];
+    fin.read_exact(&mut extension_region)?;
+    // Structural validation, plus picking out the one field this version
+    // recognizes -- an unrecognized field ID is never an error (forward
+    // compatibility), but a recognized field with an unexpected value
+    // shape is, matching decode_timestamp's convention for the metadata
+    // region.
+    let ext_fields = parse_tlv_fields(&extension_region)?;
     let mut has_trailer = false;
-    if version.has_extended_header() {
-        let mut ext_len_bytes = [0u8; 4];
-        fin.read_exact(&mut ext_len_bytes)?;
-        let ext_len = u32::from_be_bytes(ext_len_bytes) as usize;
-        if ext_len > MAX_EXTENSION_REGION_SIZE {
-            bail!("Invalid extension region length: {}", ext_len);
-        }
-        let mut extension_region = vec![0u8; ext_len];
-        fin.read_exact(&mut extension_region)?;
-        // Structural validation, plus picking out the one field this version
-        // recognizes -- an unrecognized field ID is never an error (forward
-        // compatibility), but a recognized field with an unexpected value
-        // shape is, matching decode_timestamp's convention for the metadata
-        // region.
-        let ext_fields = parse_tlv_fields(&extension_region)?;
-        for &(field_id, value) in &ext_fields {
-            if field_id == EXTENSION_FIELD_CHECKSUM_TRAILER {
-                if !value.is_empty() {
-                    bail!(
-                        "Invalid checksum trailer marker: expected an empty value, got {} bytes",
-                        value.len()
-                    );
-                }
-                has_trailer = true;
+    for &(field_id, value) in &ext_fields {
+        if field_id == EXTENSION_FIELD_CHECKSUM_TRAILER {
+            if !value.is_empty() {
+                bail!(
+                    "Invalid checksum trailer marker: expected an empty value, got {} bytes",
+                    value.len()
+                );
             }
+            has_trailer = true;
         }
-
-        let mut meta_len_bytes = [0u8; 4];
-        fin.read_exact(&mut meta_len_bytes)?;
-        let meta_len = u32::from_be_bytes(meta_len_bytes) as usize;
-        if !(TAG_SIZE..=MAX_METADATA_CIPHERTEXT_SIZE).contains(&meta_len) {
-            bail!("Invalid metadata region length: {}", meta_len);
-        }
-        metadata_ciphertext = vec![0u8; meta_len];
-        fin.read_exact(&mut metadata_ciphertext)?;
-
-        header.extend_from_slice(&ext_len_bytes);
-        header.extend_from_slice(&extension_region);
-        header.extend_from_slice(&meta_len_bytes);
-        header.extend_from_slice(&metadata_ciphertext);
+    }
+    if !has_trailer {
+        bail!("Missing required checksum trailer");
     }
 
-    // Compute header hash for AAD binding (covers the whole header,
-    // including the two PQE2/PQE3 regions above when present)
+    let mut meta_len_bytes = [0u8; 4];
+    fin.read_exact(&mut meta_len_bytes)?;
+    let meta_len = u32::from_be_bytes(meta_len_bytes) as usize;
+    if !(TAG_SIZE..=MAX_METADATA_CIPHERTEXT_SIZE).contains(&meta_len) {
+        bail!("Invalid metadata region length: {}", meta_len);
+    }
+    let mut metadata_ciphertext = vec![0u8; meta_len];
+    fin.read_exact(&mut metadata_ciphertext)?;
+
+    header.extend_from_slice(&ext_len_bytes);
+    header.extend_from_slice(&extension_region);
+    header.extend_from_slice(&meta_len_bytes);
+    header.extend_from_slice(&metadata_ciphertext);
+
+    // Compute header hash for AAD binding (covers the whole header)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     Ok(ParsedHeader {
-        version,
         header_bytes: header,
         header_hash,
         prefix_hash,
@@ -2608,30 +2388,20 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
         salt,
         base_nonce,
         metadata_ciphertext,
-        has_trailer,
     })
 }
 
 /// Computes the length of the file's encrypted chunk body -- everything up
-/// to (but not including) the optional checksum trailer -- from the raw
-/// on-disk file length and the trailer marker parsed from the header, and
-/// sanity-checks it against the header size. Shared by decrypt_file and
-/// verify_file so this security-relevant arithmetic has exactly one
-/// implementation: get this wrong and either the last chunk gets
-/// misidentified, or -- more dangerously -- trailer bytes get fed into AEAD
-/// decryption as if they were still ciphertext.
-///
-/// When `has_trailer` is false, `body_end == file_len` -- byte-for-byte what
-/// decrypt_file computed before the checksum trailer existed, which is what
-/// keeps decryption of older, trailer-less files unchanged.
-fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result<u64> {
-    let body_end = if has_trailer {
-        file_len.checked_sub(TRAILER_SIZE as u64).ok_or_else(|| {
-            anyhow::anyhow!("Invalid file: too short to contain the declared checksum trailer")
-        })?
-    } else {
-        file_len
-    };
+/// to (but not including) the checksum trailer -- from the raw on-disk file
+/// length, and sanity-checks it against the header size. Shared by
+/// decrypt_file and verify_file so this security-relevant arithmetic has
+/// exactly one implementation: get this wrong and either the last chunk
+/// gets misidentified, or -- more dangerously -- trailer bytes get fed into
+/// AEAD decryption as if they were still ciphertext.
+fn body_end_len(file_len: u64, header_end_pos: u64) -> Result<u64> {
+    let body_end = file_len.checked_sub(TRAILER_SIZE as u64).ok_or_else(|| {
+        anyhow::anyhow!("Invalid file: too short to contain the declared checksum trailer")
+    })?;
     if body_end < header_end_pos + TAG_SIZE as u64 {
         bail!(
             "Invalid ciphertext: file too short. This may indicate file truncation or corruption."
@@ -2640,10 +2410,10 @@ fn body_end_len(file_len: u64, header_end_pos: u64, has_trailer: bool) -> Result
     Ok(body_end)
 }
 
-/// Decrypts a file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM
-/// (PQE1, PQE2, or PQE3). See `decrypt_file_with_segment_size` for the real
-/// implementation; this is a thin wrapper pinning `chunks_per_segment` to
-/// the real `CHUNKS_PER_SEGMENT` constant (only meaningful for PQE3 input).
+/// Decrypts a PQE3 file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
+/// See `decrypt_file_with_segment_size` for the real implementation; this is
+/// a thin wrapper pinning `chunks_per_segment` to the real
+/// `CHUNKS_PER_SEGMENT` constant.
 fn decrypt_file(
     input_path: &str,
     output_path: Option<&str>,
@@ -2665,11 +2435,10 @@ fn decrypt_file(
 ///    destination is reported without first scanning the whole input file
 /// 2. Opens the input file once and runs `verify_open_file` on that handle
 ///    as a preflight -- header structure (magic bytes, KEM ciphertext,
-///    X25519 public key, salt, nonce, and, for PQE2/PQE3, the cleartext
-///    extension and encrypted metadata regions) and, if present, the
-///    checksum trailer -- before touching the private key at all, so
-///    accidental corruption is reported clearly and cheaply rather than
-///    partway through the slower chunk-by-chunk AEAD pass
+///    X25519 public key, salt, nonce, the cleartext extension and encrypted
+///    metadata regions) and the checksum trailer -- before touching the
+///    private key at all, so accidental corruption is reported clearly and
+///    cheaply rather than partway through the slower chunk-by-chunk AEAD pass
 /// 3. Reads the private key; if it is passphrase-encrypted, obtains the passphrase
 ///    (prompt, or the supplied one) and decrypts it, otherwise reads it as plain text
 /// 4. Rewinds the same file handle (no second `open` on the path -- see
@@ -2677,10 +2446,9 @@ fn decrypt_file(
 ///    encrypted body
 /// 5. Decapsulates the shared secret using the recipient's ML-KEM-1024 private key
 /// 6. Performs X25519 key exchange with ephemeral public key
-/// 7. Combines secrets; for PQE1/PQE2 derives the one whole-file AES-256 key via
-///    HKDF-SHA256, for PQE3 retains the combined secret to derive each body
+/// 7. Combines secrets, retaining the combined secret to derive each body
 ///    segment's key lazily as the chunk loop reaches it (see `BodyCipherProvider`)
-/// 8. For PQE2/PQE3, decrypts and parses the metadata region (original filename, mtime, atime)
+/// 8. Decrypts and parses the metadata region (original filename, mtime, atime)
 /// 9. Resolves the output path if not already claimed in step 1 -- a
 ///    sanitized embedded filename, or a `.pqe`-stripped fallback
 /// 10. Decrypts chunks using AES-256-GCM, verifying authentication tags
@@ -2693,9 +2461,9 @@ fn decrypt_file(
 ///   one from embedded metadata or the input filename (see `resolve_decrypt_output`)
 /// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
 /// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
-/// * `chunks_per_segment` - PQE3 rekey cadence; ignored for PQE1/PQE2 input.
-///   Production callers must always pass `CHUNKS_PER_SEGMENT` (see
-///   `decrypt_file`) -- this is a test-only seam, not a format parameter.
+/// * `chunks_per_segment` - rekey cadence. Production callers must always
+///   pass `CHUNKS_PER_SEGMENT` (see `decrypt_file`) -- this is a test-only
+///   seam, not a format parameter.
 ///
 /// # Returns
 /// * `Ok(())` on success
@@ -2763,7 +2531,6 @@ fn decrypt_file_with_segment_size(
     let VerifiedFile { parsed, body_end } = verified;
     let header_end_pos = parsed.header_bytes.len() as u64;
     let ParsedHeader {
-        version,
         header_hash,
         prefix_hash,
         ciphertext_kem,
@@ -2771,7 +2538,6 @@ fn decrypt_file_with_segment_size(
         salt,
         base_nonce,
         metadata_ciphertext,
-        has_trailer: _,
         ..
     } = parsed;
 
@@ -2834,85 +2600,36 @@ fn decrypt_file_with_segment_size(
     shared_secret_x25519.zeroize();
     let combined_secret = SensitiveData::new(combined_secret_bytes);
 
-    // Builds the body cipher provider and, for versions with an extended
-    // header, decrypts and parses the metadata region -- doing that before
-    // combined_secret is dropped/moved below also means a wrong recipient
-    // key is detected here, before any body-chunk work begins, for
-    // PQE2/PQE3 files.
-    let (mut body_provider, decoded_metadata): (BodyCipherProvider, Option<DecodedMetadata>) =
-        match version {
-            PqeVersion::V1 | PqeVersion::V2 => {
-                let aes_key = derive_aes_key(&combined_secret.data, &salt)?;
-                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key.data));
+    // Decrypts and parses the metadata region before combined_secret is
+    // moved into the body cipher provider below -- this also means a wrong
+    // recipient key is detected here, before any body-chunk work begins.
+    let metadata_key = derive_metadata_key(&combined_secret.data, &salt)?;
+    let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+    let metadata_aad = build_metadata_aad(&prefix_hash);
+    let mut metadata_plaintext = metadata_cipher
+        .decrypt(
+            Nonce::from_slice(&base_nonce),
+            Payload {
+                msg: metadata_ciphertext.as_slice(),
+                aad: &metadata_aad,
+            },
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Metadata decryption failed (Integrity check failed): {:?}\n\
+                Possible causes: Wrong key, corrupted file, or truncation attack.",
+                e
+            )
+        })?;
+    let decoded_metadata = decode_metadata_plaintext(&metadata_plaintext)?;
+    metadata_plaintext.zeroize();
 
-                let decoded_metadata = if version.has_extended_header() {
-                    let metadata_key = derive_metadata_key(&combined_secret.data, &salt)?;
-                    let metadata_cipher =
-                        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
-                    let metadata_aad = build_metadata_aad(&prefix_hash);
-                    let mut metadata_plaintext = metadata_cipher
-                        .decrypt(
-                            Nonce::from_slice(&base_nonce),
-                            Payload {
-                                msg: metadata_ciphertext.as_slice(),
-                                aad: &metadata_aad,
-                            },
-                        )
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Metadata decryption failed (Integrity check failed): {:?}\n\
-                                Possible causes: Wrong key, corrupted file, or truncation attack.",
-                                e
-                            )
-                        })?;
-                    let decoded = decode_metadata_plaintext(&metadata_plaintext)?;
-                    metadata_plaintext.zeroize();
-                    Some(decoded)
-                } else {
-                    None
-                };
-
-                // Not needed further -- drop now to zeroize eagerly,
-                // matching the timing of the manual `.zeroize()` call this
-                // replaced. Unlike the V3 arm below, this path never needs
-                // combined_secret to survive into the body loop.
-                drop(combined_secret);
-
-                (BodyCipherProvider::fixed(cipher), decoded_metadata)
-            }
-            PqeVersion::V3 => {
-                let metadata_key = derive_metadata_key(&combined_secret.data, &salt)?;
-                let metadata_cipher =
-                    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
-                let metadata_aad = build_metadata_aad(&prefix_hash);
-                let mut metadata_plaintext = metadata_cipher
-                    .decrypt(
-                        Nonce::from_slice(&base_nonce),
-                        Payload {
-                            msg: metadata_ciphertext.as_slice(),
-                            aad: &metadata_aad,
-                        },
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Metadata decryption failed (Integrity check failed): {:?}\n\
-                            Possible causes: Wrong key, corrupted file, or truncation attack.",
-                            e
-                        )
-                    })?;
-                let decoded = decode_metadata_plaintext(&metadata_plaintext)?;
-                metadata_plaintext.zeroize();
-
-                // combined_secret moves in here (not dropped) -- still
-                // needed to derive each segment's key lazily as the chunk
-                // loop below reaches it; zeroizes whenever body_provider
-                // drops (the end of this function, on every exit path).
-                (
-                    BodyCipherProvider::segmented(combined_secret, salt, chunks_per_segment),
-                    Some(decoded),
-                )
-            }
-        };
+    // combined_secret moves in here -- still needed to derive each
+    // segment's key lazily as the chunk loop below reaches it; zeroizes
+    // whenever body_provider drops (the end of this function, on every exit
+    // path).
+    let mut body_provider = BodyCipherProvider::new(combined_secret, salt, chunks_per_segment);
+    let decoded_metadata = Some(decoded_metadata);
 
     // Resolve the final output path and claim it, now that a metadata-driven
     // default (if needed) is known. An explicit -o was already claimed above.
@@ -3066,14 +2783,14 @@ struct VerifiedFile {
     body_end: u64,
 }
 
-/// Checks a PQE1/PQE2/PQE3 file's magic bytes and header structure, and, if the
-/// header's extension region marks a checksum trailer as present,
-/// recomputes a SHA-256 over the whole file (minus the trailer itself) and
-/// compares it. Needs no private key or passphrase, so it can run
-/// unattended (e.g. in cron, right after a backup) as the standalone
-/// `pqenc verify` command -- and `decrypt_file` also calls this directly as
-/// a preflight before touching any key material, so a corrupted file is
-/// rejected clearly and cheaply rather than partway through the AEAD pass.
+/// Checks a PQE3 file's magic bytes and header structure, then recomputes a
+/// SHA-256 over the whole file (minus the trailer itself) and compares it
+/// against the embedded checksum trailer. Needs no private key or
+/// passphrase, so it can run unattended (e.g. in cron, right after a
+/// backup) as the standalone `pqenc verify` command -- and `decrypt_file`
+/// also calls this directly as a preflight before touching any key
+/// material, so a corrupted file is rejected clearly and cheaply rather
+/// than partway through the AEAD pass.
 ///
 /// This is a plain, unauthenticated checksum, not cryptographic
 /// authentication: it catches accidental corruption (bit rot, truncation, a
@@ -3081,34 +2798,24 @@ struct VerifiedFile {
 /// file can recompute it after modifying the file. Deliberate tampering is
 /// still caught by the AEAD tags at actual decrypt time.
 ///
-/// A file with no trailer (an older PQE2 file predating this feature, or a
-/// PQE1 file) still gets the structural checks; the checksum comparison is
-/// simply skipped, and that's not itself a failure.
-///
 /// Takes an already-open handle rather than a path, and leaves it
-/// positioned just past whatever it last read (past the trailer, or past
-/// the body if there's no trailer). `decrypt_file` relies on this: it opens
-/// `fin` once, verifies it here, and then seeks the very same handle back
-/// to the start of the body to decrypt -- rather than reopening the path a
-/// second time, which would leave a window between the check and the
-/// decrypt where the file at that path could be swapped out from under it.
+/// positioned just past the trailer. `decrypt_file` relies on this: it
+/// opens `fin` once, verifies it here, and then seeks the very same handle
+/// back to the start of the body to decrypt -- rather than reopening the
+/// path a second time, which would leave a window between the check and
+/// the decrypt where the file at that path could be swapped out from under
+/// it.
 ///
 /// # Returns
-/// * `Ok(VerifiedFile)` if the file is structurally valid (and its checksum matches, when present)
+/// * `Ok(VerifiedFile)` if the file is structurally valid and its checksum matches
 /// * `Err` otherwise -- callers (main) translate this into a non-zero exit code
 fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
     let parsed = parse_header(fin)?;
     let header_end_pos = parsed.header_bytes.len() as u64;
     let file_len = fin.metadata()?.len();
-    let body_end = body_end_len(file_len, header_end_pos, parsed.has_trailer)?;
+    let body_end = body_end_len(file_len, header_end_pos)?;
 
-    println!("Structure OK: valid {} header", parsed.version.label());
-
-    if !parsed.has_trailer {
-        println!("No checksum trailer present (file predates this feature, or is PQE1); skipping checksum check.");
-        println!("VALID (structure only): {}", input_path);
-        return Ok(VerifiedFile { parsed, body_end });
-    }
+    println!("Structure OK: valid PQE3 header");
 
     use sha2::Digest;
     let mut hasher = Sha256::new();

@@ -63,15 +63,15 @@ Tests internal utility functions and crypto operations:
 - AES key derivation (HKDF)
 - Nonce generation
 - Key fingerprinting
-- PQE2 metadata encoding/decoding (filename, mtime, atime)
-- PQE2 file format parsing and decrypt behavior
+- Metadata encoding/decoding (filename, mtime, atime)
+- File format parsing and decrypt behavior, including path-traversal
+  rejection for a malicious embedded filename
 - Output-path claim / temp-file guard ordering
 - Stale reservation-placeholder reclaim logic
 - PQE3 per-segment body key derivation: different segment indices derive
-  different keys, the same index derives deterministically, and domain
-  separation from PQE1/PQE2's whole-file key
+  different keys, and the same index derives deterministically
 - PQE3 body-chunk AAD: differs across segment index and local chunk index,
-  and is a distinct byte length from PQE1/PQE2's and the metadata region's AAD
+  and is a distinct byte length from the metadata region's AAD
 - PQE3 segment/local-chunk-index boundary arithmetic, including at the real
   8 GiB segment size
 - PQE3 round trips (empty, single-chunk, multi-chunk single-segment, and a
@@ -108,7 +108,7 @@ Tests `pqenc verify`'s checksum-trailer validation and `pqenc decrypt`'s
 automatic verify preflight:
 - Valid files pass; corrupted trailer, body, or header is detected
 - Trailer-removal detection and rejection of invalid magic bytes/missing files
-- Backward compatibility with pre-trailer-format files
+- Rejection of a file whose checksum trailer marker is missing entirely
 - `pqenc decrypt` runs verify first and reports both stages, failing before
   decryption starts on a bad file, and refusing an occupied output path
   before paying for the full-file scan
