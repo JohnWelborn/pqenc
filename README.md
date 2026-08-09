@@ -36,8 +36,8 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 
 ```bash
 pqenc generate-keys -p pub.key -s priv.key
-pqenc encrypt -p pub.key -i secret.txt        # produces secret.txt.pqe
-pqenc decrypt -s priv.key -i secret.txt.pqe   # restores secret.txt (name/timestamps from metadata)
+pqenc encrypt -p pub.key secret.txt        # produces secret.txt.pqe
+pqenc decrypt -s priv.key secret.txt.pqe   # restores secret.txt (name/timestamps from metadata)
 ```
 
 ## Typical Workflow
@@ -82,8 +82,8 @@ Do a full round trip with the keys you just generated:
 
 ```bash
 echo "restore test" > test.txt
-pqenc encrypt --public-key pub.key --encrypt test.txt --output test.pqe
-pqenc decrypt --private-key priv.key --decrypt test.pqe --output test.out
+pqenc encrypt --public-key pub.key test.txt --output test.pqe
+pqenc decrypt --private-key priv.key test.pqe --output test.out
 cmp test.txt test.out && echo "restore verified"
 ```
 
@@ -109,10 +109,10 @@ whichever check you use whenever you replace or move either key file.
 
 ```bash
 # Encrypt a single file
-pqenc encrypt --public-key pub.key --encrypt data.tar.gz --output data.tar.gz.pqe
+pqenc encrypt --public-key pub.key data.tar.gz --output data.tar.gz.pqe
 
 # Encrypt a directory without writing plaintext to disk
-tar czf - /path/to/data | pqenc encrypt --public-key pub.key --encrypt - --output backup.tar.gz.pqe
+tar czf - /path/to/data | pqenc encrypt --public-key pub.key - --output backup.tar.gz.pqe
 ```
 
 Encrypted output is written with mode `0600` (owner read/write only). If a backup
@@ -140,7 +140,7 @@ that older release before upgrading.
 ### 4. Check backup integrity without the private key (optional, cron-friendly)
 
 ```bash
-pqenc verify --verify backup.tar.gz.pqe
+pqenc verify backup.tar.gz.pqe
 ```
 
 Checks magic bytes and header structure, and — for files carrying a checksum
@@ -164,7 +164,7 @@ touching the private key — see the next step.
 ### 5. Decrypt to restore (only when needed, using the private key)
 
 ```bash
-pqenc decrypt --private-key priv.key --decrypt backup.tar.gz.pqe --output backup.tar.gz
+pqenc decrypt --private-key priv.key backup.tar.gz.pqe --output backup.tar.gz
 ```
 
 Decrypt always verifies the file first (the same check as `pqenc verify`,

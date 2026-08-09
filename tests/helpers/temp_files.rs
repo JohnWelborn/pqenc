@@ -73,7 +73,6 @@ impl TempTestEnv {
         let result = Command::new(binary)
             .args([
                 "decrypt",
-                "--decrypt",
                 input,
                 "--output",
                 output,

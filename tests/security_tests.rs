@@ -28,7 +28,6 @@ fn test_truncation_attack_detected() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -72,7 +71,6 @@ fn test_bit_flip_detected() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -118,7 +116,6 @@ fn test_encryption_is_nondeterministic() {
         let output = Command::new(pqenc_binary())
             .args([
                 "encrypt",
-                "--encrypt",
                 input_path.to_str().unwrap(),
                 "--output",
                 enc_path.to_str().unwrap(),
@@ -155,7 +152,6 @@ fn test_encrypted_file_does_not_contain_plaintext_content() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -191,7 +187,6 @@ fn test_encrypted_file_does_not_contain_original_filename() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -247,7 +242,6 @@ fn test_header_tampering_detected() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -292,7 +286,6 @@ fn test_ciphertext_tampering_detected() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),

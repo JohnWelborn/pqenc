@@ -26,7 +26,7 @@ proptest! {
         // Encrypt
         let output = Command::new(pqenc_binary())
             .args(["encrypt",
-                "--encrypt", input_path.to_str().unwrap(),
+                input_path.to_str().unwrap(),
                 "--output", encrypted_path.to_str().unwrap(),
                 "--public-key", pub_key.to_str().unwrap()])
             .output()
@@ -77,7 +77,7 @@ proptest! {
         // Encrypt
         let output = Command::new(pqenc_binary())
             .args(["encrypt",
-                "--encrypt", input_path.to_str().unwrap(),
+                input_path.to_str().unwrap(),
                 "--output", encrypted_path.to_str().unwrap(),
                 "--public-key", pub_key.to_str().unwrap()])
             .output()
@@ -119,7 +119,7 @@ proptest! {
         // Encrypt
         let output = Command::new(pqenc_binary())
             .args(["encrypt",
-                "--encrypt", input_path.to_str().unwrap(),
+                input_path.to_str().unwrap(),
                 "--output", encrypted_path.to_str().unwrap(),
                 "--public-key", pub_key.to_str().unwrap()])
             .output()

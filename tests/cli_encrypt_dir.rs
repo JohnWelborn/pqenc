@@ -73,7 +73,6 @@ fn test_encrypt_directory_via_tar_command() {
     let mut enc = Command::new(&pqenc_bin)
         .args([
             "encrypt",
-            "--encrypt",
             "/dev/stdin",
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -106,7 +105,6 @@ fn test_encrypt_directory_via_tar_command() {
     let decrypt_output = Command::new(&pqenc_bin)
         .args([
             "decrypt",
-            "--decrypt",
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_tar_path.to_str().unwrap(),
@@ -185,7 +183,6 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
     let mut enc = Command::new(&pqenc_bin)
         .args([
             "encrypt",
-            "--encrypt",
             "-",
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -208,7 +205,6 @@ fn test_encrypt_directory_via_tar_stdin_shorthand() {
     let decrypt_output = Command::new(&pqenc_bin)
         .args([
             "decrypt",
-            "--decrypt",
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_tar_path.to_str().unwrap(),

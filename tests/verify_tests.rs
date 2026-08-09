@@ -16,7 +16,6 @@ fn encrypt_bytes(env: &TempTestEnv, name: &str, plaintext: &[u8]) -> Vec<u8> {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -36,7 +35,7 @@ fn encrypt_bytes(env: &TempTestEnv, name: &str, plaintext: &[u8]) -> Vec<u8> {
 
 fn run_verify(path: &std::path::Path) -> std::process::Output {
     Command::new(pqenc_binary())
-        .args(["verify", "--verify", path.to_str().unwrap()])
+        .args(["verify", path.to_str().unwrap()])
         .output()
         .unwrap()
 }
@@ -226,7 +225,6 @@ fn run_decrypt(
     Command::new(pqenc_binary())
         .args([
             "decrypt",
-            "--decrypt",
             input.to_str().unwrap(),
             "--output",
             output.to_str().unwrap(),

@@ -30,7 +30,6 @@ fn test_full_workflow_small_file() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -75,7 +74,6 @@ fn test_sha256_matches_before_encryption_and_after_decryption() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -118,7 +116,6 @@ fn test_empty_file() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -156,7 +153,6 @@ fn test_exactly_one_chunk() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -194,7 +190,6 @@ fn test_wrong_passphrase_fails() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -242,7 +237,6 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -259,7 +253,6 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
     let output = Command::new(pqenc_binary())
         .args([
             "decrypt",
-            "--decrypt",
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_path.to_str().unwrap(),
@@ -290,7 +283,6 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -306,7 +298,6 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
     let output = Command::new(pqenc_binary())
         .args([
             "decrypt",
-            "--decrypt",
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_path.to_str().unwrap(),
@@ -337,7 +328,6 @@ fn test_file_format_has_magic_bytes() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -364,7 +354,6 @@ fn test_optional_output_defaults_round_trip() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--public-key",
             pub_key.to_str().unwrap(),
@@ -393,7 +382,6 @@ fn test_optional_output_defaults_round_trip() {
     let output = Command::new(pqenc_binary())
         .args([
             "decrypt",
-            "--decrypt",
             expected_encrypted_path.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
@@ -436,7 +424,6 @@ fn test_decrypt_restores_original_mtime() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -455,7 +442,6 @@ fn test_decrypt_restores_original_mtime() {
     let output = Command::new(pqenc_binary())
         .args([
             "decrypt",
-            "--decrypt",
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_path.to_str().unwrap(),
@@ -495,7 +481,6 @@ fn test_large_file_multiple_chunks() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -545,7 +530,6 @@ fn test_exact_multiple_of_chunk_size_with_trailer() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -594,7 +578,6 @@ fn test_encrypt_refuses_existing_output() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -638,7 +621,6 @@ fn test_encrypt_success_leaves_no_temp_file() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -687,7 +669,6 @@ fn test_encrypted_output_permissions() {
     let output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -743,7 +724,6 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
     let mut child = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             "-",
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -832,7 +812,6 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
     let retry_output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             retry_input.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),
@@ -1231,7 +1210,6 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     let encrypt_output = Command::new(pqenc_binary())
         .args([
             "encrypt",
-            "--encrypt",
             input_path.to_str().unwrap(),
             "--output",
             encrypted_path.to_str().unwrap(),

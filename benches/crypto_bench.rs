@@ -70,7 +70,6 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
                     let output = Command::new(pqenc_binary())
                         .args([
                             "encrypt",
-                            "--encrypt",
                             input_path.to_str().unwrap(),
                             "--output",
                             output_path.to_str().unwrap(),
@@ -109,7 +108,6 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
         Command::new(pqenc_binary())
             .args([
                 "encrypt",
-                "--encrypt",
                 input_path.to_str().unwrap(),
                 "--output",
                 encrypted_path.to_str().unwrap(),
@@ -127,7 +125,6 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
                     let output = Command::new(pqenc_binary())
                         .args([
                             "decrypt",
-                            "--decrypt",
                             encrypted_path.to_str().unwrap(),
                             "--output",
                             output_path.to_str().unwrap(),

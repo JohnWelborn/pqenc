@@ -115,7 +115,7 @@ automatic verify preflight:
 
 ### CLI Tests (`tests/cli_encrypt_dir.rs`)
 Tests directory encryption via tar piping (Unix only):
-- Encrypt a directory using `tar czf - dir | pqenc encrypt --encrypt /dev/stdin`
+- Encrypt a directory using `tar czf - dir | pqenc encrypt /dev/stdin`
 - Encrypt a directory using the `-` stdin shorthand
 
 ### Property-Based Tests (`tests/property_tests.rs`)

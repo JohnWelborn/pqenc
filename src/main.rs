@@ -329,22 +329,22 @@ Examples:
   pqenc generate-keys --public-key pub.key --private-key priv.key
 
   # Encrypt a file
-  pqenc encrypt --encrypt secret.txt --output secret.enc --public-key pub.key
+  pqenc encrypt secret.txt --output secret.enc --public-key pub.key
 
   # Encrypt from stdin (e.g., piped tar archive)
-  tar czf - mydir | pqenc encrypt --encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
+  tar czf - mydir | pqenc encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
 
   # Encrypt from stdin using '-' shorthand
-  cat secret.txt | pqenc encrypt --encrypt - --output secret.enc --public-key pub.key
+  cat secret.txt | pqenc encrypt - --output secret.enc --public-key pub.key
 
   # Decrypt a file
-  pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key
+  pqenc decrypt secret.enc --output secret.txt --private-key priv.key
 
   # Non-interactive (e.g. scripts, CI): pass the passphrase directly
-  pqenc decrypt --decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
+  pqenc decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
 
   # Check a file's structure and checksum without the private key (cron-friendly)
-  pqenc verify --verify secret.enc
+  pqenc verify secret.enc
 
   # Generate a keypair with no passphrase (e.g. disk already encrypted)
   pqenc generate-keys --public-key pub.key --private-key priv.key --passphrase \"\"
@@ -375,7 +375,7 @@ enum Commands {
         passphrase: Option<String>,
     },
     Encrypt {
-        #[arg(long = "encrypt", short = 'i')]
+        #[arg(help = "Input file to encrypt (use \"-\" or /dev/stdin to read from a pipe)")]
         input: String,
         #[arg(long, short = 'o', help = "Output file (default: <input>.pqe)")]
         output: Option<String>,
@@ -383,11 +383,7 @@ enum Commands {
         public_key: String,
     },
     Decrypt {
-        #[arg(
-            long = "decrypt",
-            short = 'i',
-            help = "Input file to decrypt (must be a regular file, not stdin or a pipe)"
-        )]
+        #[arg(help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
         input: String,
         #[arg(
             long,
@@ -406,11 +402,7 @@ enum Commands {
         passphrase: Option<String>,
     },
     Verify {
-        #[arg(
-            long = "verify",
-            short = 'i',
-            help = "Input file to verify (must be a regular file, not stdin or a pipe)"
-        )]
+        #[arg(help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
         input: String,
     },
     Fingerprint {
@@ -1989,7 +1981,7 @@ fn encrypt_file_with_segment_size(
             bail!(
                 "Input file is a directory, not a file: {}\n\n\
                 pqenc can only encrypt individual files. To encrypt a directory:\n\
-                tar czf - {} | pqenc encrypt --encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
+                tar czf - {} | pqenc encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
                 input_path, dirname, dirname, public_key_path
             );
         }
