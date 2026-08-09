@@ -343,7 +343,7 @@ Examples:
   # Non-interactive (e.g. scripts, CI): pass the passphrase directly
   pqenc decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
 
-  # Check a file's structure and checksum without the private key (cron-friendly)
+  # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.enc
 
   # Generate a keypair with no passphrase (e.g. disk already encrypted)
@@ -361,6 +361,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Generate a new ML-KEM-1024 + X25519 hybrid keypair")]
     GenerateKeys {
         #[arg(long, short = 'p')]
         public_key: String,
@@ -374,6 +375,7 @@ enum Commands {
         )]
         passphrase: Option<String>,
     },
+    #[command(about = "Encrypt a file using a public key")]
     Encrypt {
         #[arg(help = "Input file to encrypt (use \"-\" or /dev/stdin to read from a pipe)")]
         input: String,
@@ -382,6 +384,7 @@ enum Commands {
         #[arg(long, short = 'p')]
         public_key: String,
     },
+    #[command(about = "Decrypt a file using the private key")]
     Decrypt {
         #[arg(help = "Input file to decrypt (must be a regular file, not stdin or a pipe)")]
         input: String,
@@ -401,10 +404,14 @@ enum Commands {
         )]
         passphrase: Option<String>,
     },
+    #[command(
+        about = "Check an encrypted file for corruption (does not detect tampering)"
+    )]
     Verify {
         #[arg(help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
         input: String,
     },
+    #[command(about = "Show a key's fingerprint and randomart")]
     Fingerprint {
         #[command(flatten)]
         key_source: KeySource,
