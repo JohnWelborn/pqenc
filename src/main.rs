@@ -129,7 +129,7 @@ use aes_gcm::{
 };
 use anyhow::{bail, Context, Result};
 use base64::prelude::*;
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use hkdf::Hkdf;
 use libcrux_ml_kem::mlkem1024;
 use rand::Rng;
@@ -319,7 +319,7 @@ const PEM_PRIV_END: &str = "-----END PQENC PRIVATE KEY-----";
 #[derive(Parser)]
 #[command(
     name = "pqenc",
-    about = "Post-Quantum File Encryption Tool (ML-KEM-1024 + AES-256-GCM)",
+    about = "Post-Quantum File Encryption Tool (ML-KEM-1024 + X25519 hybrid + AES-256-GCM)",
     long_about = None,
     subcommand_required = true,
     arg_required_else_help = true,
@@ -340,9 +340,9 @@ Examples:
   # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.enc
 
-  # Show a key's fingerprint and randomart (works on either half of a keypair)
-  pqenc fingerprint --public-key pub.key
-  pqenc fingerprint --private-key priv.key
+  # Show a key's fingerprint and randomart
+  pqenc fingerprint pub.key
+  pqenc fingerprint priv.key
 "
 )]
 struct Cli {
@@ -404,27 +404,16 @@ enum Commands {
     },
     #[command(about = "Show a key's fingerprint and randomart")]
     Fingerprint {
-        #[command(flatten)]
-        key_source: KeySource,
+        #[arg(help = "Public or private key file to fingerprint (auto-detected)")]
+        key: String,
         #[arg(
             long,
             help = "Passphrase for the private key, skipping the interactive prompt. \
             Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Not needed for a plain-text private key; if supplied, it is ignored."
+            Not needed for a plain-text private key or a public key; if supplied and not needed, it is ignored."
         )]
         passphrase: Option<String>,
     },
-}
-
-#[derive(Args)]
-#[group(required = true, multiple = false)]
-struct KeySource {
-    /// Public key file to fingerprint
-    #[arg(long, short = 'p')]
-    public_key: Option<String>,
-    /// Private key file to fingerprint (prompts for a passphrase if encrypted)
-    #[arg(long, short = 's')]
-    private_key: Option<String>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -1037,36 +1026,36 @@ fn randomart_border(label: &str, width: usize) -> String {
 
 /// Displays the fingerprint and randomart for a public or private key file.
 ///
-/// Exactly one of `public_key_path`/`private_key_path` is supplied (enforced
-/// by the CLI's `KeySource` argument group). Both produce an identical
-/// fingerprint for the same keypair, since both ultimately hash the same
-/// composite public key bytes -- see `extract_public_from_private`.
-fn show_fingerprint(
-    public_key_path: Option<String>,
-    private_key_path: Option<String>,
-    passphrase: Option<String>,
-) -> Result<()> {
-    let (composite_pub, display_path) = if let Some(path) = public_key_path {
-        validate_path(&path, true, false, "Public key")?;
-        let pem_text = fs::read_to_string(&path).context("Failed to read public key")?;
+/// Auto-detects which half of the keypair `key_path` is by sniffing its PEM
+/// header (same style as `load_private_key`'s encrypted-vs-plain-text
+/// check). Both halves produce an identical fingerprint for the same
+/// keypair, since both ultimately hash the same composite public key bytes
+/// -- see `extract_public_from_private`.
+fn show_fingerprint(key_path: String, passphrase: Option<String>) -> Result<()> {
+    validate_path(&key_path, true, false, "Key")?;
+    let pem_text = fs::read_to_string(&key_path).context("Failed to read key file")?;
+
+    let composite_pub = if pem_text.contains(PEM_PUB_BEGIN) {
+        if let Some(mut p) = passphrase {
+            eprintln!("Note: fingerprinting a public key; ignoring supplied passphrase.");
+            p.zeroize();
+        }
         let composite_pub = pem_decode(&pem_text, PEM_PUB_BEGIN, PEM_PUB_END)?;
         // Validate structure so a corrupt or foreign file fails clearly.
         parse_public_composite_key(&composite_pub)?;
-        (composite_pub, path)
-    } else if let Some(path) = private_key_path {
-        validate_path(&path, true, false, "Private key")?;
-        let composite_priv = load_private_key(&path, passphrase)?;
+        composite_pub
+    } else if pem_text.contains(PEM_PRIV_BEGIN) || pem_text.contains(PEM_PRIV_ENC_BEGIN) {
+        let composite_priv = load_private_key(&key_path, passphrase)?;
         let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
-        let composite_pub = extract_public_from_private(&mlkem_sk.data, &x25519_sk.data)?;
-        (composite_pub, path)
+        extract_public_from_private(&mlkem_sk.data, &x25519_sk.data)?
     } else {
-        unreachable!("clap enforces exactly one of --public-key/--private-key")
+        bail!("Not a valid pqenc public or private key file: {}", key_path);
     };
 
     let digest = compute_fingerprint(&composite_pub);
 
     println!("The key fingerprint is:");
-    println!("{} {}", format_fingerprint(&digest), display_path);
+    println!("{} {}", format_fingerprint(&digest), key_path);
     println!("The key's randomart image is:");
     println!("{}", randomart(&digest, "ML-KEM-1024", "SHA256"));
 
@@ -1156,11 +1145,8 @@ fn run() -> Result<()> {
         Commands::Verify { input } => {
             verify_file(&input)?;
         }
-        Commands::Fingerprint {
-            key_source,
-            passphrase,
-        } => {
-            show_fingerprint(key_source.public_key, key_source.private_key, passphrase)?;
+        Commands::Fingerprint { key, passphrase } => {
+            show_fingerprint(key, passphrase)?;
         }
     }
 

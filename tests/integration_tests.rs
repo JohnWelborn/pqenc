@@ -1144,7 +1144,7 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let from_pub = Command::new(pqenc_binary())
-        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .args(["fingerprint", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(from_pub.status.success());
@@ -1153,7 +1153,6 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let from_priv = Command::new(pqenc_binary())
         .args([
             "fingerprint",
-            "--private-key",
             priv_key.to_str().unwrap(),
             "--passphrase",
             TEST_PASSPHRASE,
@@ -1174,29 +1173,46 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
 }
 
 #[test]
-fn test_fingerprint_requires_exactly_one_key_source() {
+fn test_fingerprint_requires_exactly_one_argument() {
     let env = TempTestEnv::new();
     let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
-    // Neither flag supplied.
+    // No key path supplied.
     let neither = Command::new(pqenc_binary())
         .args(["fingerprint"])
         .output()
         .unwrap();
     assert!(!neither.status.success());
 
-    // Both flags supplied.
+    // Two key paths supplied.
     let both = Command::new(pqenc_binary())
         .args([
             "fingerprint",
-            "--public-key",
             pub_key.to_str().unwrap(),
-            "--private-key",
             priv_key.to_str().unwrap(),
         ])
         .output()
         .unwrap();
     assert!(!both.status.success());
+}
+
+#[test]
+fn test_fingerprint_rejects_file_that_is_neither_key_type() {
+    let env = TempTestEnv::new();
+    let not_a_key = env.create_file("not_a_key.txt", b"this is not a pqenc key file");
+
+    let output = Command::new(pqenc_binary())
+        .args(["fingerprint", not_a_key.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Not a valid pqenc public or private key file"),
+        "stderr: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -1233,7 +1249,7 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     );
 
     let fingerprint_output = Command::new(pqenc_binary())
-        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
+        .args(["fingerprint", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     let fingerprint_stdout = String::from_utf8_lossy(&fingerprint_output.stdout).into_owned();
