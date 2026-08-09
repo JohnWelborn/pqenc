@@ -331,23 +331,14 @@ Examples:
   # Encrypt a file
   pqenc encrypt secret.txt --output secret.enc --public-key pub.key
 
-  # Encrypt from stdin (e.g., piped tar archive)
-  tar czf - mydir | pqenc encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
-
-  # Encrypt from stdin using '-' shorthand
-  cat secret.txt | pqenc encrypt - --output secret.enc --public-key pub.key
-
   # Decrypt a file
   pqenc decrypt secret.enc --output secret.txt --private-key priv.key
 
-  # Non-interactive (e.g. scripts, CI): pass the passphrase directly
-  pqenc decrypt secret.enc --output secret.txt --private-key priv.key --passphrase \"$PQENC_PASSPHRASE\"
+  # Encrypt a directory (tar+gzip into a single compressed archive)
+  tar czf - mydir | pqenc encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
 
   # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.enc
-
-  # Generate a keypair with no passphrase (e.g. disk already encrypted)
-  pqenc generate-keys --public-key pub.key --private-key priv.key --passphrase \"\"
 
   # Show a key's fingerprint and randomart (works on either half of a keypair)
   pqenc fingerprint --public-key pub.key
