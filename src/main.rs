@@ -1909,6 +1909,25 @@ impl BodyCipherProvider {
     }
 }
 
+/// Concatenates the ML-KEM and X25519 shared secrets into a single 64-byte
+/// `SensitiveData`, zeroizing the X25519 half in place once copied. Shared by
+/// `encrypt_file_with_segment_size` and `decrypt_file_with_segment_size` so
+/// this has exactly one implementation. Takes both secrets by reference
+/// rather than by value: `kem_secret`'s own `ZeroizeOnDrop` still fires in
+/// the caller as usual, and `x25519_secret.zeroize()` runs on the caller's
+/// actual variable via `&mut` -- no extra copy of either secret is created
+/// here for zeroizing to miss.
+fn combine_secrets(
+    kem_secret: &SensitiveData,
+    x25519_secret: &mut x25519_dalek::SharedSecret,
+) -> SensitiveData {
+    let mut combined = Vec::with_capacity(SHARED_SECRET_SIZE);
+    combined.extend_from_slice(kem_secret.data.as_slice());
+    combined.extend_from_slice(x25519_secret.as_bytes());
+    x25519_secret.zeroize();
+    SensitiveData::new(combined)
+}
+
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM, always writing
 /// the current format (PQE3). See `encrypt_file_with_segment_size` for the
 /// real implementation; this is a thin wrapper pinning `chunks_per_segment`
@@ -2013,11 +2032,7 @@ fn encrypt_file_with_segment_size(
     // ever moved into BodyCipherProvider -- zeroizes it via ZeroizeOnDrop,
     // rather than relying on a manual `.zeroize()` call that only ran on a
     // specific success path.
-    let mut combined_secret_bytes = Vec::with_capacity(SHARED_SECRET_SIZE);
-    combined_secret_bytes.extend_from_slice(kem_secret_guard.data.as_slice());
-    combined_secret_bytes.extend_from_slice(shared_secret_x25519.as_bytes());
-    shared_secret_x25519.zeroize();
-    let combined_secret = SensitiveData::new(combined_secret_bytes);
+    let combined_secret = combine_secrets(&kem_secret_guard, &mut shared_secret_x25519);
 
     let mut salt = [0u8; SALT_SIZE];
     rand::rng().fill_bytes(&mut salt);
@@ -2570,11 +2585,7 @@ fn decrypt_file_with_segment_size(
     // path below -- including a `?` early return -- zeroizes it via
     // ZeroizeOnDrop, rather than relying on a manual `.zeroize()` call that
     // only ran on a specific success path.
-    let mut combined_secret_bytes = Vec::with_capacity(SHARED_SECRET_SIZE);
-    combined_secret_bytes.extend_from_slice(kem_secret_guard.data.as_slice());
-    combined_secret_bytes.extend_from_slice(shared_secret_x25519.as_bytes());
-    shared_secret_x25519.zeroize();
-    let combined_secret = SensitiveData::new(combined_secret_bytes);
+    let combined_secret = combine_secrets(&kem_secret_guard, &mut shared_secret_x25519);
 
     // Decrypts and parses the metadata region before combined_secret is
     // moved into the body cipher provider below -- this also means a wrong
