@@ -22,15 +22,28 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 
 ## Quick Start
 
+**1. Generate a keypair, secure priv.key offline:**
+
 ```bash
 pqenc generate-keys -p pub.key -s priv.key
+```
 
-pqenc encrypt -p pub.key bank.txt -o secret.pqe   # produces secret.pqe
+**2. Encrypt with the public key:**
 
-pqenc decrypt -s priv.key secret.pqe              # restores bank.txt
+```bash
+pqenc encrypt bank.txt -p pub.key -o secret.pqe
+```
 
-# Encrypt a directory (tar+gzip into a single compressed archive)
-tar czf - mydir | pqenc encrypt /dev/stdin --output secret.pqe --public-key pub.key
+**3. Decrypt with the private key:**
+
+```bash
+pqenc decrypt secret.pqe -s priv.key
+```
+
+**Encrypting a directory (tar+gzip into a single compressed archive):**
+
+```bash
+tar czf - mydir | pqenc encrypt /dev/stdin --output secret.pqe -p pub.key
 ```
 
 ## Features
