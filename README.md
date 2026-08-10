@@ -51,7 +51,7 @@ tar czf - mydir | pqenc encrypt /dev/stdin --output secret.pqe -p pub.key
 - **ML-KEM-1024** (NIST FIPS 203) - Post-quantum key encapsulation mechanism
 - **X25519** - Hybrid classical key exchange for defense in depth
 - **AES-256-GCM** - Authenticated encryption with additional data
-- **Segmented rekeying (PQE3)** - the current format `pqenc encrypt` writes divides plaintext into fixed 8 GiB segments, each independently keyed via HKDF-SHA256, so no single AES-256-GCM key ever encrypts more than 8 GiB regardless of total file size
+- **Segmented rekeying (PQE4, also reads legacy PQE3)** - the current format `pqenc encrypt` writes divides plaintext into fixed 8 GiB segments, each independently keyed via HKDF-SHA256, so no single AES-256-GCM key ever encrypts more than 8 GiB regardless of total file size; `pqenc decrypt`/`pqenc verify` also still read files from the older PQE3 format
 - **Formally verified** - Uses libcrux, a formally verified cryptography library
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk

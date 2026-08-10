@@ -64,20 +64,28 @@ Tests internal utility functions and crypto operations:
 - Nonce generation
 - Key fingerprinting
 - Metadata encoding/decoding (filename, mtime, atime)
-- File format parsing and decrypt behavior, including path-traversal
-  rejection for a malicious embedded filename
+- File format parsing and decrypt behavior for both PQE4 (current) and PQE3
+  (legacy, read-only), including path-traversal rejection for a malicious
+  embedded filename through each format's own metadata code path
 - Output-path claim / temp-file guard ordering
 - Stale reservation-placeholder reclaim logic
-- PQE3 per-segment body key derivation: different segment indices derive
-  different keys, and the same index derives deterministically
-- PQE3 body-chunk AAD: differs across segment index and local chunk index,
-  and is a distinct byte length from the metadata region's AAD
-- PQE3 segment/local-chunk-index boundary arithmetic, including at the real
+- Per-segment body key derivation (shared by both formats): different
+  segment indices derive different keys, and the same index derives
+  deterministically
+- Body-chunk AAD: differs across segment index and local chunk index and by
+  format-version byte (PQE3 vs PQE4), and is a distinct byte length from the
+  legacy metadata region's AAD
+- Segment/local-chunk-index boundary arithmetic, including at the real
   8 GiB segment size
-- PQE3 round trips (empty, single-chunk, multi-chunk single-segment, and a
+- PQE4 round trips (empty, single-chunk, multi-chunk single-segment, and a
   multi-segment transition exercised via a small test-only segment size) and
   tampering detection (cross-segment chunk swap, corrupted final tag,
   truncation, corrupted checksum trailer)
+- A legacy PQE3 file (hand-built independent of `encrypt_file`, which only
+  ever writes PQE4) still decrypts correctly, including its embedded
+  filename and timestamps
+- An oversized embedded filename would push PQE4's folded metadata over its
+  per-chunk-0 size cap
 
 ### Integration Tests (`tests/integration_tests.rs`)
 Tests full encrypt/decrypt workflows via the CLI:

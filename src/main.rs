@@ -4,15 +4,15 @@
 //! for key encapsulation, X25519 for an additional DH secret, and AES-256-GCM
 //! for symmetric encryption. The combined secret (ML-KEM shared secret ||
 //! X25519 shared secret) and a per-file salt are HKDF-derived, via distinct
-//! domain-separated info strings, into a metadata-region key and one or more
-//! body-chunk keys (see "File Format" below).
+//! domain-separated info strings, into one or more body-chunk keys (and, for
+//! legacy PQE3 files only, a metadata-region key) -- see "File Format" below.
 //!
 //! # Security Features
 //! - ML-KEM-1024: Post-quantum secure key encapsulation mechanism
 //! - X25519: Ephemeral-static Diffie-Hellman mixed with the KEM secret
-//! - HKDF-SHA256: Derives the metadata-region key and the body-chunk key(s)
-//!   from ML-KEM secret || X25519 secret, each via its own domain-separated
-//!   info string
+//! - HKDF-SHA256: Derives the body-chunk key(s) (and, for legacy PQE3 files,
+//!   the metadata-region key) from ML-KEM secret || X25519 secret, each via
+//!   its own domain-separated info string
 //! - AES-256-GCM: Authenticated encryption with additional data
 //! - Context-binding AAD: Each chunk authenticated with its position, the
 //!   header hash, the format version, and segment index -- see below
@@ -23,8 +23,13 @@
 //!   8 GiB regardless of total file size
 //!
 //! # File Format
+//! `pqenc encrypt` always writes the current format, `PQE4`. `pqenc decrypt`
+//! and `pqenc verify` accept both `PQE4` and the legacy `PQE3` format
+//! (read-only -- `pqenc` never writes `PQE3` anymore), dispatching on the
+//! 4-byte magic (see `parse_header`). The two formats share every header
+//! field up through the cleartext extension region:
 //! ```text
-//! [4 bytes: Magic "PQE3"]
+//! [4 bytes: Magic "PQE4" or "PQE3"]
 //! [4 bytes: KEM ciphertext length]
 //! [N bytes: KEM ciphertext]
 //! [32 bytes: ephemeral X25519 public key]
@@ -36,11 +41,17 @@
 //!           future field needs no further magic bump. One field defined today:
 //!           field 0x01 (empty value, required) marks that a 32-byte SHA-256
 //!           checksum trailer follows the last encrypted chunk (see below)]
-//! [4 bytes: encrypted metadata region length]
-//! [M bytes: AEAD-encrypted TLV (original filename, mtime, atime), under a
-//!           key domain-separated from the body key(s)]
-//! [Encrypted chunks with 16-byte authentication tags -- see "Segmented
-//!           Body Encryption" below]
+//! ```
+//! ## PQE4 (current)
+//! The header ends after the extension region above -- there is no separate
+//! metadata region. Instead, a length-prefixed metadata TLV (original
+//! filename, mtime, atime) is prepended to the plaintext stream before
+//! chunking, so it becomes the first bytes of encrypted chunk 0, ahead of
+//! the real file content (see "Metadata placement" below):
+//! ```text
+//! [Encrypted chunks with 16-byte authentication tags -- chunk 0 begins with
+//!           a 4-byte BE length prefix + the metadata TLV, then real file
+//!           bytes; see "Segmented Body Encryption" below]
 //! [32 bytes: SHA-256 checksum trailer. Covers every preceding byte of the
 //!           file (header through the last chunk) but not itself, computed
 //!           incrementally during encryption. Not part of the AEAD scheme and
@@ -49,13 +60,38 @@
 //!           key, via `pqenc verify`. Gives no protection against deliberate
 //!           tampering, which the AEAD tags above already catch at decrypt time]
 //! ```
-//! `pqenc` only ever reads and writes `PQE3`; the checksum trailer is
-//! mandatory on every file.
+//! ## PQE3 (legacy, read-only)
+//! Continues after the extension region with a standalone AEAD-encrypted
+//! metadata region instead, under a key domain-separated from the body
+//! key(s); chunk 0 of the body is then ordinary file content, carrying no
+//! metadata:
+//! ```text
+//! [4 bytes: encrypted metadata region length]
+//! [M bytes: AEAD-encrypted TLV (original filename, mtime, atime), under a
+//!           key domain-separated from the body key(s)]
+//! [Encrypted chunks with 16-byte authentication tags]
+//! [32 bytes: SHA-256 checksum trailer, as above]
+//! ```
+//! The checksum trailer is mandatory on every file, in both formats.
+//!
+//! ## Metadata placement
+//! PQE3's separately-length-prefixed metadata region leaked the original
+//! filename's exact byte length to anyone holding the file: AES-256-GCM adds
+//! no padding (ciphertext length = plaintext length + 16-byte tag), and
+//! mtime/atime always encode to a fixed size, so the cleartext metadata
+//! region length field alone was enough to recover the filename's length
+//! without decrypting anything. PQE4 closes this by not framing metadata
+//! separately at all -- folding it into the start of the encrypted body
+//! instead, exactly like OpenPGP's Literal Data packet, means an outside
+//! observer can only ever learn the *combined* length of metadata + content,
+//! never decompose it into a filename-length signal.
 //!
 //! # Segmented Body Encryption
-//! The plaintext is divided into fixed `SEGMENT_SIZE` (8 GiB) segments --
-//! the final segment may be shorter -- and each is encrypted under an
-//! independent AES-256-GCM key:
+//! Identical for both formats -- segment rekeying has nothing to do with
+//! metadata placement. The plaintext (chunk 0 embedding metadata, for PQE4)
+//! is divided into fixed `SEGMENT_SIZE` (8 GiB) segments -- the final segment
+//! may be shorter -- and each is encrypted under an independent AES-256-GCM
+//! key:
 //! ```text
 //! segment_key = HKDF-SHA256-Expand(
 //!     PRK = HKDF-Extract(salt, combined_secret),
@@ -63,6 +99,10 @@
 //!     L = 32
 //! )
 //! ```
+//! (`derive_body_key_v3`/`AES_KEY_INFO_V3_PREFIX` keep their "_v3"/"pqe3"
+//! names as a historical artifact -- this derivation is unchanged and fully
+//! shared by both formats, not PQE3-specific.)
+//!
 //! `CHUNK_SIZE` (64 KiB) evenly divides `SEGMENT_SIZE`, so `CHUNKS_PER_SEGMENT`
 //! (131072) is exact and a segment boundary always lands on a chunk edge --
 //! no chunk ever spans two segments. Nonces reset to `get_nonce(base_nonce,
@@ -72,7 +112,8 @@
 //!
 //! Each body chunk's AAD is:
 //! ```text
-//! [1 byte: format version = 0x03]
+//! [1 byte: format version -- AAD_VERSION_V3 (0x03) for a PQE3 file's
+//!          chunks, AAD_VERSION_V4 (0x04) for a PQE4 file's]
 //! [1 byte: chunk_type -- 0x00 normal, 0x01 = final chunk of the *entire
 //!          file*, never merely the final chunk of a segment]
 //! [8 bytes: segment_index, big-endian]
@@ -83,14 +124,19 @@
 //! as a whole -- together with each segment's independent key, this prevents
 //! chunk reordering, cross-segment cut-and-paste (a ciphertext chunk from one
 //! segment can never be replayed into another segment's position: wrong key
-//! *and* wrong AAD), and header substitution.
+//! *and* wrong AAD), and header substitution. The format-version byte is not
+//! strictly required for this -- `header_hash` already differs between
+//! formats since PQE4's header has a different magic and a shorter structure
+//! -- but matches this codebase's belt-and-suspenders approach elsewhere,
+//! and machine-checks the fact that PQE4 chunk 0 carries different semantics
+//! (embedded metadata) than PQE3 chunk 0 (plain content).
 //!
 //! # Private-Key Envelope Format
 //! The passphrase-protected private-key blob -- the entire content of a
 //! `PQENC ENCRYPTED PRIVATE KEY` PEM file, before PEM-wrapping -- is a
 //! small binary envelope with its own version tag, separate from the
-//! `PQE3` magic above (that magic versions the encrypted *file* format;
-//! this section is about the encrypted *private key* format):
+//! `PQE3`/`PQE4` magic above (that magic versions the encrypted *file*
+//! format; this section is about the encrypted *private key* format):
 //! ```text
 //! [1 byte:  envelope version = 0x01]
 //! [1 byte:  KDF algorithm id = 0x01 (Argon2id)]
@@ -135,7 +181,7 @@ use libcrux_ml_kem::mlkem1024;
 use rand::Rng;
 use sha2::Sha256;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Constants
@@ -149,6 +195,13 @@ const MAX_KEM_CIPHERTEXT_SIZE: usize = 10000;
 // encrypted chunk -- see EXTENSION_FIELD_CHECKSUM_TRAILER below.
 const TRAILER_SIZE: usize = 32;
 const MAGIC_V3: &[u8] = b"PQE3";
+// PQE4: current format written by `encrypt`. Identical to PQE3 through the
+// cleartext extension region; PQE3's separately-framed encrypted metadata
+// region is gone, folded into the start of the encrypted body instead (see
+// "File Format" doc comment above and MAX_METADATA_TLV_SIZE_V4 below).
+// `decrypt`/`verify` still read PQE3 (legacy, read-only) via parse_header's
+// magic dispatch.
+const MAGIC_V4: &[u8] = b"PQE4";
 
 // Body segmentation. Plaintext is divided into fixed SEGMENT_SIZE segments
 // (the final segment may be shorter), each encrypted under its own
@@ -196,6 +249,21 @@ const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
 // the metadata region's build_metadata_aad (33 bytes): build_aad_v3 is 50
 // bytes, a length that never collides with it.
 const AAD_VERSION_V3: u8 = 0x03;
+
+// PQE4's counterpart to AAD_VERSION_V3. Not cryptographically required --
+// header_hash already differs between formats since PQE4's header has a
+// different magic and a different (shorter) structure -- but matches the
+// same belt-and-suspenders reasoning as AAD_VERSION_V3 above: PQE4 chunk 0
+// carries different semantics (embedded metadata) than PQE3 chunk 0 (plain
+// content), so it gets its own explicit version byte too.
+const AAD_VERSION_V4: u8 = 0x04;
+
+// Cap on the metadata TLV (filename + mtime/atime) folded into PQE4's
+// chunk 0, comfortably under CHUNK_SIZE so it always lands entirely inside
+// that one chunk -- decrypt never has to handle metadata spanning a chunk
+// boundary. Distinct from MAX_METADATA_PLAINTEXT_SIZE below, which bounds
+// PQE3's separately-framed (legacy-only) metadata region.
+const MAX_METADATA_TLV_SIZE_V4: usize = 4096;
 
 // Header regions after base_nonce. Both length prefixes are
 // attacker-controlled before validation, so each region has a
@@ -1454,11 +1522,13 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     Ok(*Nonce::from_slice(&nonce_bytes))
 }
 
-/// Builds Additional Authenticated Data for a body chunk.
+/// Builds Additional Authenticated Data for a body chunk, for either format
+/// -- `version` is `AAD_VERSION_V3` for PQE3 chunks or `AAD_VERSION_V4` for
+/// PQE4 chunks (see `BodyCipherProvider::aad_version`).
 ///
 /// Binds:
-/// - version: 1 byte (AAD_VERSION_V3), explicit even though `header_hash`
-///   already transitively covers the header's magic bytes
+/// - version: 1 byte, explicit even though `header_hash` already
+///   transitively covers the header's magic bytes
 /// - chunk_type: 1 byte (0x00 normal, 0x01 -- only for the final chunk of
 ///   the *entire file*, never merely the final chunk of a segment)
 /// - segment_index: 8 bytes (u64 big-endian)
@@ -1472,19 +1542,33 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
 /// prevents header substitution. Deliberately 50 bytes -- a length distinct
 /// from `build_metadata_aad`'s 33, so the two AAD "channels" can never be
 /// confused even by byte length alone.
-fn build_aad_v3(
+fn build_aad(
+    version: u8,
     chunk_type: u8,
     segment_index: u64,
     local_chunk_index: u64,
     header_hash: &[u8; 32],
 ) -> [u8; 50] {
     let mut aad = [0u8; 50];
-    aad[0] = AAD_VERSION_V3;
+    aad[0] = version;
     aad[1] = chunk_type;
     aad[2..10].copy_from_slice(&segment_index.to_be_bytes());
     aad[10..18].copy_from_slice(&local_chunk_index.to_be_bytes());
     aad[18..50].copy_from_slice(header_hash);
     aad
+}
+
+/// Test-only: production code calls `build_aad(AAD_VERSION_V3, ...)` via
+/// `BodyCipherProvider` directly. Kept as a named wrapper purely so existing
+/// PQE3-specific tests and fixtures don't need to change.
+#[cfg(test)]
+fn build_aad_v3(
+    chunk_type: u8,
+    segment_index: u64,
+    local_chunk_index: u64,
+    header_hash: &[u8; 32],
+) -> [u8; 50] {
+    build_aad(AAD_VERSION_V3, chunk_type, segment_index, local_chunk_index, header_hash)
 }
 
 /// Splits a global (whole-file) chunk index into a `(segment_index,
@@ -1855,15 +1939,24 @@ struct BodyCipherProvider {
     combined_secret: SensitiveData,
     salt: [u8; SALT_SIZE],
     chunks_per_segment: u64,
+    // AAD_VERSION_V3 or AAD_VERSION_V4, matching the format of the file
+    // being encrypted/decrypted -- see build_aad.
+    aad_version: u8,
     cached_segment: Option<(u64, Aes256Gcm)>,
 }
 
 impl BodyCipherProvider {
-    fn new(combined_secret: SensitiveData, salt: [u8; SALT_SIZE], chunks_per_segment: u64) -> Self {
+    fn new(
+        combined_secret: SensitiveData,
+        salt: [u8; SALT_SIZE],
+        chunks_per_segment: u64,
+        aad_version: u8,
+    ) -> Self {
         BodyCipherProvider {
             combined_secret,
             salt,
             chunks_per_segment,
+            aad_version,
             cached_segment: None,
         }
     }
@@ -1903,7 +1996,13 @@ impl BodyCipherProvider {
         }
         let cipher = &self.cached_segment.as_ref().unwrap().1;
 
-        let aad = build_aad_v3(chunk_type, segment_index, local_chunk_index, header_hash);
+        let aad = build_aad(
+            self.aad_version,
+            chunk_type,
+            segment_index,
+            local_chunk_index,
+            header_hash,
+        );
         let nonce = get_nonce(base_nonce, local_chunk_index)?;
         Ok((cipher, nonce, aad.to_vec()))
     }
@@ -1948,25 +2047,27 @@ fn fill_buffer(r: &mut dyn Read, buf: &mut [u8]) -> Result<usize> {
 }
 
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM, always writing
-/// the current format (PQE3). See `encrypt_file_with_segment_size` for the
+/// the current format (PQE4). See `encrypt_file_with_segment_size` for the
 /// real implementation; this is a thin wrapper pinning `chunks_per_segment`
 /// to the real `CHUNKS_PER_SEGMENT` constant.
 fn encrypt_file(input_path: &str, output_path: &str, public_key_path: &str) -> Result<()> {
     encrypt_file_with_segment_size(input_path, output_path, public_key_path, CHUNKS_PER_SEGMENT)
 }
 
-/// Performs hybrid post-quantum encryption, writing a PQE3 file:
+/// Performs hybrid post-quantum encryption, writing a PQE4 file:
 /// 1. Encapsulates a shared secret using the recipient's ML-KEM-1024 public key
 /// 2. Performs X25519 key exchange with ephemeral key
-/// 3. Combines both secrets and derives a domain-separated metadata key using
-///    HKDF-SHA256 (body keys are derived per-segment, lazily, in step 5)
-/// 4. Captures the input file's basename, mtime, and atime (skipped for stdin)
-///    and encrypts them into the header's metadata region
+/// 3. Combines both secrets (body keys are derived per-segment, lazily, in
+///    step 5)
+/// 4. Captures the input file's basename, mtime, and atime (skipped for
+///    stdin), TLV-encodes and length-prefixes them, and prepends that to the
+///    plaintext stream so chunk 0 of the encrypted body starts with it --
+///    see "Metadata placement" in the module doc comment for why
 /// 5. Encrypts the file in 64KB chunks using AES-256-GCM, rekeying to a fresh,
 ///    independently HKDF-derived key every `chunks_per_segment` chunks (see
 ///    `BodyCipherProvider`)
 /// 6. Writes encrypted output with header containing KEM ciphertext, X25519 public
-///    key, salt, base nonce, and the extension/metadata regions
+///    key, salt, base nonce, and the cleartext extension region
 /// 7. Streams into a sibling temp file and renames it into place, so a failed
 ///    run never leaves a partial output that looks like a completed backup
 ///
@@ -2059,10 +2160,9 @@ fn encrypt_file_with_segment_size(
     let mut base_nonce = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut base_nonce);
 
-    // No whole-file body key: PQE3 derives one independent key per segment,
+    // No whole-file body key: PQE4 derives one independent key per segment,
     // lazily, inside BodyCipherProvider once the header (and therefore
     // header_hash) is known below.
-    let metadata_key = derive_metadata_key(&combined_secret.data, &salt)?;
 
     let mut fin = open_input(input_path)?;
     let (input_size, source_metadata) = if is_stdin {
@@ -2083,6 +2183,27 @@ fn encrypt_file_with_segment_size(
             }),
         )
     };
+
+    // Fold metadata into the logical plaintext stream instead of encrypting
+    // it separately (see "Metadata placement" in the module doc comment): a
+    // length-prefixed metadata TLV becomes the first bytes of chunk 0, ahead
+    // of the real file content, exactly like OpenPGP's Literal Data packet.
+    // This is what makes the metadata's own length unrecoverable to an
+    // outside observer -- they can only ever learn the combined length of
+    // metadata + content.
+    let metadata_tlv = encode_metadata_plaintext(source_metadata.as_ref());
+    if metadata_tlv.len() > MAX_METADATA_TLV_SIZE_V4 {
+        bail!(
+            "Embedded metadata (filename + timestamps) is {} bytes, exceeding \
+            the {}-byte limit; rename the input file to something shorter",
+            metadata_tlv.len(),
+            MAX_METADATA_TLV_SIZE_V4
+        );
+    }
+    let mut metadata_prefixed = Vec::with_capacity(4 + metadata_tlv.len());
+    metadata_prefixed.extend_from_slice(&(metadata_tlv.len() as u32).to_be_bytes());
+    metadata_prefixed.extend_from_slice(&metadata_tlv);
+    fin = Box::new(Cursor::new(metadata_prefixed).chain(fin));
 
     // Claim the output path atomically. O_CREAT|O_EXCL both enforces the
     // "already exists" rejection and prevents TOCTOU/symlink attacks, and it
@@ -2110,7 +2231,7 @@ fn encrypt_file_with_segment_size(
     // Build header and compute hash for AAD
     let kem_ct_len = ciphertext.as_slice().len() as u32;
     let mut header = Vec::new();
-    header.extend_from_slice(MAGIC_V3);
+    header.extend_from_slice(MAGIC_V4);
     header.extend_from_slice(&kem_ct_len.to_be_bytes());
     header.extend_from_slice(ciphertext.as_slice());
     header.extend_from_slice(ephemeral_public.as_bytes());
@@ -2118,12 +2239,6 @@ fn encrypt_file_with_segment_size(
     header.extend_from_slice(&base_nonce);
 
     use sha2::Digest;
-
-    // prefix_hash binds the metadata region's AEAD call to the fixed header
-    // fields above, computed now because the metadata ciphertext doesn't
-    // exist yet -- header_hash (below) covers the whole header including
-    // the metadata region, so it can't be computed until after this point.
-    let prefix_hash: [u8; 32] = Sha256::digest(&header).into();
 
     // Cleartext extension region: marks that a SHA-256 checksum trailer
     // follows the last chunk (see below). Structurally present for other
@@ -2133,26 +2248,11 @@ fn encrypt_file_with_segment_size(
     header.extend_from_slice(&(extension_region.len() as u32).to_be_bytes());
     header.extend_from_slice(&extension_region);
 
-    // Encrypted metadata region: original filename + mtime/atime, under a
-    // key domain-separated from the body key (see derive_metadata_key).
-    let mut metadata_plaintext = encode_metadata_plaintext(source_metadata.as_ref());
-    let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
-    let metadata_aad = build_metadata_aad(&prefix_hash);
-    let metadata_ciphertext = metadata_cipher
-        .encrypt(
-            Nonce::from_slice(&base_nonce),
-            Payload {
-                msg: metadata_plaintext.as_slice(),
-                aad: &metadata_aad,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Metadata encryption failed: {}", e))?;
-    metadata_plaintext.zeroize();
-    header.extend_from_slice(&(metadata_ciphertext.len() as u32).to_be_bytes());
-    header.extend_from_slice(&metadata_ciphertext);
+    // No separate metadata region: the header ends here for PQE4. The
+    // metadata TLV was already folded into `fin` above, so it's encrypted as
+    // the start of chunk 0 by the chunk loop below.
 
-    // Compute header hash for AAD binding (covers the whole header, including
-    // the two regions above)
+    // Compute header hash for AAD binding (covers the whole header)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     // Write header to file
@@ -2171,8 +2271,9 @@ fn encrypt_file_with_segment_size(
     // combined_secret moves in here -- still needed to derive each
     // segment's key lazily as the loop below reaches it; now zeroizes
     // whenever body_provider drops (the end of this function, on every
-    // exit path, including a `?` mid-loop).
-    let mut body_provider = BodyCipherProvider::new(combined_secret, salt, chunks_per_segment);
+    // exit path, including a `?` mid-loop). encrypt only ever writes PQE4.
+    let mut body_provider =
+        BodyCipherProvider::new(combined_secret, salt, chunks_per_segment, AAD_VERSION_V4);
 
     let mut chunk_index: u64 = 0;
 
@@ -2263,8 +2364,23 @@ fn encrypt_file_with_segment_size(
     Ok(())
 }
 
+/// Which on-disk format a parsed header was read as. PQE3 carries a
+/// standalone AEAD-encrypted metadata region in the header
+/// (`ParsedHeader::metadata_ciphertext`); PQE4 folds metadata into chunk 0
+/// of the body instead, so `metadata_ciphertext` is always empty for it.
+/// Callers must match on this field rather than infer format from that
+/// emptiness -- PQE3's own length bound happens to make an empty ciphertext
+/// impossible for it too, but that's an incidental consequence of an
+/// unrelated bounds check, not a documented invariant of this struct.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FileFormat {
+    V3,
+    V4,
+}
+
 /// Result of `parse_header`: everything decrypt_file/verify_file need from
-/// the structural-only (no key material required) part of a PQE3 file.
+/// the structural-only (no key material required) part of a PQE3 or PQE4
+/// file.
 struct ParsedHeader {
     header_bytes: Vec<u8>,
     header_hash: [u8; 32],
@@ -2274,11 +2390,12 @@ struct ParsedHeader {
     salt: [u8; SALT_SIZE],
     base_nonce: [u8; NONCE_SIZE],
     metadata_ciphertext: Vec<u8>,
+    format: FileFormat,
 }
 
-/// Parses and structurally validates a PQE3 header: magic bytes,
-/// length-prefixed fields, the cleartext extension region, and the
-/// encrypted metadata region -- every check that doesn't require the
+/// Parses and structurally validates a PQE3 or PQE4 header: magic bytes,
+/// length-prefixed fields, the cleartext extension region, and (PQE3 only)
+/// the encrypted metadata region -- every check that doesn't require the
 /// private key. Shared by `decrypt_file` and `verify_file` so this logic
 /// (including the bounds checks on attacker-controlled length prefixes)
 /// has exactly one implementation instead of two that can drift apart.
@@ -2290,9 +2407,13 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
 
     let mut magic = [0u8; 4];
     fin.read_exact(&mut magic)?;
-    if magic != MAGIC_V3 {
+    let format = if magic == MAGIC_V3 {
+        FileFormat::V3
+    } else if magic == MAGIC_V4 {
+        FileFormat::V4
+    } else {
         bail!("Invalid file format or version");
-    }
+    };
 
     let mut len_bytes = [0u8; 4];
     fin.read_exact(&mut len_bytes)?;
@@ -2358,19 +2479,28 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
         bail!("Missing required checksum trailer");
     }
 
-    let mut meta_len_bytes = [0u8; 4];
-    fin.read_exact(&mut meta_len_bytes)?;
-    let meta_len = u32::from_be_bytes(meta_len_bytes) as usize;
-    if !(TAG_SIZE..=MAX_METADATA_CIPHERTEXT_SIZE).contains(&meta_len) {
-        bail!("Invalid metadata region length: {}", meta_len);
-    }
-    let mut metadata_ciphertext = vec![0u8; meta_len];
-    fin.read_exact(&mut metadata_ciphertext)?;
-
     header.extend_from_slice(&ext_len_bytes);
     header.extend_from_slice(&extension_region);
-    header.extend_from_slice(&meta_len_bytes);
-    header.extend_from_slice(&metadata_ciphertext);
+
+    // PQE3 only: a standalone AEAD-encrypted metadata region follows the
+    // extension region. PQE4 has no such field -- its header ends here, and
+    // its metadata lives in chunk 0 of the body instead (see decrypt_file).
+    let metadata_ciphertext = match format {
+        FileFormat::V3 => {
+            let mut meta_len_bytes = [0u8; 4];
+            fin.read_exact(&mut meta_len_bytes)?;
+            let meta_len = u32::from_be_bytes(meta_len_bytes) as usize;
+            if !(TAG_SIZE..=MAX_METADATA_CIPHERTEXT_SIZE).contains(&meta_len) {
+                bail!("Invalid metadata region length: {}", meta_len);
+            }
+            let mut metadata_ciphertext = vec![0u8; meta_len];
+            fin.read_exact(&mut metadata_ciphertext)?;
+            header.extend_from_slice(&meta_len_bytes);
+            header.extend_from_slice(&metadata_ciphertext);
+            metadata_ciphertext
+        }
+        FileFormat::V4 => Vec::new(),
+    };
 
     // Compute header hash for AAD binding (covers the whole header)
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
@@ -2384,6 +2514,7 @@ fn parse_header(fin: &mut File) -> Result<ParsedHeader> {
         salt,
         base_nonce,
         metadata_ciphertext,
+        format,
     })
 }
 
@@ -2406,10 +2537,65 @@ fn body_end_len(file_len: u64, header_end_pos: u64) -> Result<u64> {
     Ok(body_end)
 }
 
-/// Decrypts a PQE3 file encrypted with ML-KEM-1024 + X25519 + AES-256-GCM.
-/// See `decrypt_file_with_segment_size` for the real implementation; this is
-/// a thin wrapper pinning `chunks_per_segment` to the real
-/// `CHUNKS_PER_SEGMENT` constant.
+/// Reads and AEAD-decrypts exactly one body chunk at `chunk_index`,
+/// advancing `body_pos` by the ciphertext bytes consumed. Returns `Ok(None)`
+/// once `body_pos` has reached `body_end` (no more chunks).
+///
+/// Factored out of the main decrypt loop so PQE4's chunk-0 special case can
+/// share it: chunk 0 of a PQE4 file carries embedded metadata ahead of real
+/// file content, and is decrypted through this exact same function --
+/// callers just consume its plaintext differently (split into metadata +
+/// content, instead of written straight to the output file).
+fn decrypt_body_chunk(
+    fin: &mut File,
+    body_provider: &mut BodyCipherProvider,
+    chunk_index: u64,
+    body_pos: &mut u64,
+    body_end: u64,
+    header_hash: &[u8; 32],
+    base_nonce: &[u8; NONCE_SIZE],
+) -> Result<Option<Vec<u8>>> {
+    let remaining = body_end.saturating_sub(*body_pos);
+    if remaining == 0 {
+        return Ok(None);
+    }
+    let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
+    let read_target = std::cmp::min(encrypted_chunk_size as u64, remaining) as usize;
+
+    let mut buffer = vec![0u8; read_target];
+    let bytes_read = fill_buffer(fin, &mut buffer)?;
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    *body_pos += bytes_read as u64;
+
+    let chunk_type = if *body_pos == body_end {
+        AAD_CHUNK_TYPE_LAST
+    } else {
+        AAD_CHUNK_TYPE_NORMAL
+    };
+
+    let (cipher, nonce, aad) =
+        body_provider.params_for(chunk_index, chunk_type, header_hash, base_nonce)?;
+    let payload = Payload {
+        msg: &buffer[..bytes_read],
+        aad: aad.as_slice(),
+    };
+
+    let plaintext = cipher.decrypt(&nonce, payload).map_err(|e| {
+        anyhow::anyhow!(
+            "Decryption failed (Integrity check failed): {:?}\n\
+            Possible causes: Wrong key, corrupted file, or truncation attack.",
+            e
+        )
+    })?;
+    Ok(Some(plaintext))
+}
+
+/// Decrypts a PQE3 or PQE4 file encrypted with ML-KEM-1024 + X25519 +
+/// AES-256-GCM. See `decrypt_file_with_segment_size` for the real
+/// implementation; this is a thin wrapper pinning `chunks_per_segment` to
+/// the real `CHUNKS_PER_SEGMENT` constant.
 fn decrypt_file(
     input_path: &str,
     output_path: Option<&str>,
@@ -2534,6 +2720,7 @@ fn decrypt_file_with_segment_size(
         salt,
         base_nonce,
         metadata_ciphertext,
+        format: parsed_format,
         ..
     } = parsed;
 
@@ -2592,36 +2779,91 @@ fn decrypt_file_with_segment_size(
     // only ran on a specific success path.
     let combined_secret = combine_secrets(&kem_secret_guard, &mut shared_secret_x25519);
 
-    // Decrypts and parses the metadata region before combined_secret is
-    // moved into the body cipher provider below -- this also means a wrong
-    // recipient key is detected here, before any body-chunk work begins.
-    let metadata_key = derive_metadata_key(&combined_secret.data, &salt)?;
-    let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
-    let metadata_aad = build_metadata_aad(&prefix_hash);
-    let mut metadata_plaintext = metadata_cipher
-        .decrypt(
-            Nonce::from_slice(&base_nonce),
-            Payload {
-                msg: metadata_ciphertext.as_slice(),
-                aad: &metadata_aad,
-            },
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Metadata decryption failed (Integrity check failed): {:?}\n\
-                Possible causes: Wrong key, corrupted file, or truncation attack.",
-                e
-            )
-        })?;
-    let decoded_metadata = decode_metadata_plaintext(&metadata_plaintext)?;
-    metadata_plaintext.zeroize();
+    // combined_secret moves in here -- needed both to derive each segment's
+    // key lazily as the chunk loop below reaches it, and (PQE3 only) to
+    // derive the metadata key just below; zeroizes whenever body_provider
+    // drops (the end of this function, on every exit path). Constructed
+    // before metadata handling because PQE4's metadata now requires a
+    // body-chunk decrypt (chunk 0) to reach, unlike PQE3's standalone
+    // metadata AEAD region.
+    let aad_version = match parsed_format {
+        FileFormat::V3 => AAD_VERSION_V3,
+        FileFormat::V4 => AAD_VERSION_V4,
+    };
+    let mut body_provider =
+        BodyCipherProvider::new(combined_secret, salt, chunks_per_segment, aad_version);
 
-    // combined_secret moves in here -- still needed to derive each
-    // segment's key lazily as the chunk loop below reaches it; zeroizes
-    // whenever body_provider drops (the end of this function, on every exit
-    // path).
-    let mut body_provider = BodyCipherProvider::new(combined_secret, salt, chunks_per_segment);
-    let decoded_metadata = Some(decoded_metadata);
+    let mut chunk_index: u64 = 0;
+    let mut body_pos = header_end_pos;
+
+    // Recovers the original filename/mtime/atime (if any) and -- for PQE4
+    // only -- the leftover bytes of chunk 0 that follow the metadata, which
+    // are real file content and must be written to the output before the
+    // main decrypt loop below continues from chunk_index 1 (for PQE3,
+    // chunk0_remainder is simply empty, a no-op when written).
+    //
+    // This also means a wrong recipient key is detected right here, before
+    // any further body-chunk work begins, for both formats.
+    let (decoded_metadata, chunk0_remainder): (Option<DecodedMetadata>, Vec<u8>) =
+        match parsed_format {
+            FileFormat::V3 => {
+                let metadata_key = derive_metadata_key(&body_provider.combined_secret.data, &salt)?;
+                let metadata_cipher =
+                    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+                let metadata_aad = build_metadata_aad(&prefix_hash);
+                let mut metadata_plaintext = metadata_cipher
+                    .decrypt(
+                        Nonce::from_slice(&base_nonce),
+                        Payload {
+                            msg: metadata_ciphertext.as_slice(),
+                            aad: &metadata_aad,
+                        },
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Metadata decryption failed (Integrity check failed): {:?}\n\
+                            Possible causes: Wrong key, corrupted file, or truncation attack.",
+                            e
+                        )
+                    })?;
+                let decoded = decode_metadata_plaintext(&metadata_plaintext)?;
+                metadata_plaintext.zeroize();
+                (Some(decoded), Vec::new())
+            }
+            FileFormat::V4 => {
+                let plaintext0 = decrypt_body_chunk(
+                    &mut fin,
+                    &mut body_provider,
+                    chunk_index,
+                    &mut body_pos,
+                    body_end,
+                    &header_hash,
+                    &base_nonce,
+                )?
+                .context(
+                    "Malformed PQE4 file: missing body \
+                    (expected chunk 0 to carry embedded metadata)",
+                )?;
+                chunk_index = chunk_index
+                    .checked_add(1)
+                    .context("Chunk counter overflow -- file too large")?;
+
+                if plaintext0.len() < 4 {
+                    bail!("Malformed PQE4 chunk 0: too short to contain a metadata length prefix");
+                }
+                let tlv_len = u32::from_be_bytes(plaintext0[0..4].try_into().unwrap()) as usize;
+                if 4 + tlv_len > plaintext0.len() {
+                    bail!(
+                        "Malformed PQE4 chunk 0: embedded metadata length ({} bytes) \
+                        exceeds chunk 0's content",
+                        tlv_len
+                    );
+                }
+                let decoded = decode_metadata_plaintext(&plaintext0[4..4 + tlv_len])?;
+                let remainder = plaintext0[4 + tlv_len..].to_vec();
+                (Some(decoded), remainder)
+            }
+        };
 
     // Resolve the final output path and claim it, now that a metadata-driven
     // default (if needed) is known. An explicit -o was already claimed above.
@@ -2653,53 +2895,29 @@ fn decrypt_file_with_segment_size(
 
     // Perform decryption - any error will trigger cleanup of temp file
     let decrypt_result = (|| -> Result<()> {
-        let encrypted_chunk_size = CHUNK_SIZE + TAG_SIZE;
-        let mut chunk_index: u64 = 0;
+        // Chunk 0's post-metadata remainder (real file content) for PQE4;
+        // empty, so a no-op, for PQE3 -- either way this is the start of the
+        // real file's content, decrypted above before the output path was
+        // even resolved.
+        let mut chunk0_remainder = chunk0_remainder;
+        fout.write_all(&chunk0_remainder)?;
+        chunk0_remainder.zeroize();
 
-        // Running position, bounded by body_end (computed above from the
-        // header's trailer marker) rather than the raw file length -- this
-        // is what keeps a trailer's bytes from ever being read as if they
-        // were still ciphertext. Tracked locally instead of re-querying
-        // fin.stream_position() each iteration.
-        let mut body_pos = header_end_pos;
-
-        loop {
-            let remaining = body_end.saturating_sub(body_pos);
-            if remaining == 0 {
-                break;
-            }
-            let read_target = std::cmp::min(encrypted_chunk_size as u64, remaining) as usize;
-
-            // Read up to read_target.
-            let mut buffer = vec![0u8; read_target];
-            let bytes_read = fill_buffer(&mut fin, &mut buffer)?;
-
-            if bytes_read == 0 {
-                break;
-            }
-            body_pos += bytes_read as u64;
-
-            let chunk_type = if body_pos == body_end {
-                AAD_CHUNK_TYPE_LAST
-            } else {
-                AAD_CHUNK_TYPE_NORMAL
-            };
-
-            let (cipher, nonce, aad) =
-                body_provider.params_for(chunk_index, chunk_type, &header_hash, &base_nonce)?;
-            let payload = Payload {
-                msg: &buffer[..bytes_read],
-                aad: aad.as_slice(),
-            };
-
-            let mut plaintext = cipher.decrypt(&nonce, payload).map_err(|e| {
-                anyhow::anyhow!(
-                    "Decryption failed (Integrity check failed): {:?}\n\
-                    Possible causes: Wrong key, corrupted file, or truncation attack.",
-                    e
-                )
-            })?;
-
+        // chunk_index/body_pos continue from wherever metadata handling
+        // above left them: (1, past chunk 0) for PQE4, (0, header_end_pos)
+        // for PQE3 -- body_end is bounded by the header's trailer marker
+        // (computed above), not the raw file length, which is what keeps a
+        // trailer's bytes from ever being read as if they were still
+        // ciphertext.
+        while let Some(mut plaintext) = decrypt_body_chunk(
+            &mut fin,
+            &mut body_provider,
+            chunk_index,
+            &mut body_pos,
+            body_end,
+            &header_hash,
+            &base_nonce,
+        )? {
             fout.write_all(&plaintext)?;
             plaintext.zeroize();
 
@@ -2767,8 +2985,8 @@ struct VerifiedFile {
     body_end: u64,
 }
 
-/// Checks a PQE3 file's magic bytes and header structure, then recomputes a
-/// SHA-256 over the whole file (minus the trailer itself) and compares it
+/// Checks a PQE3 or PQE4 file's magic bytes and header structure, then
+/// recomputes a SHA-256 over the whole file (minus the trailer itself) and compares it
 /// against the embedded checksum trailer. Needs no private key or
 /// passphrase, so it can run unattended (e.g. in cron, right after a
 /// backup) as the standalone `pqenc verify` command -- and `decrypt_file`
@@ -2799,7 +3017,11 @@ fn verify_open_file(fin: &mut File, input_path: &str) -> Result<VerifiedFile> {
     let file_len = fin.metadata()?.len();
     let body_end = body_end_len(file_len, header_end_pos)?;
 
-    println!("Structure OK: valid PQE3 header");
+    let format_name = match parsed.format {
+        FileFormat::V3 => "PQE3",
+        FileFormat::V4 => "PQE4",
+    };
+    println!("Structure OK: valid {} header", format_name);
 
     use sha2::Digest;
     let mut hasher = Sha256::new();

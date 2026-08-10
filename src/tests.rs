@@ -675,6 +675,33 @@ mod metadata_tests {
     }
 
     #[test]
+    fn test_metadata_tlv_size_scales_with_filename_length() {
+        // encrypt_file_with_segment_size bails if encode_metadata_plaintext's
+        // output exceeds MAX_METADATA_TLV_SIZE_V4, so the metadata TLV
+        // always fits entirely inside PQE4 chunk 0. Exercising that bail
+        // via a real file isn't practical -- OS filename limits (typically
+        // 255 bytes) are far below the cap -- so this proves the arithmetic
+        // the bail depends on instead: a filename long enough to push the
+        // TLV over the cap really does, and a realistic one doesn't.
+        let mtime = filetime::FileTime::from_unix_time(0, 0);
+        let atime = filetime::FileTime::from_unix_time(0, 0);
+
+        let realistic = SourceMetadata {
+            filename: Some("a".repeat(200)),
+            mtime,
+            atime,
+        };
+        assert!(encode_metadata_plaintext(Some(&realistic)).len() <= MAX_METADATA_TLV_SIZE_V4);
+
+        let oversized = SourceMetadata {
+            filename: Some("a".repeat(MAX_METADATA_TLV_SIZE_V4 + 100)),
+            mtime,
+            atime,
+        };
+        assert!(encode_metadata_plaintext(Some(&oversized)).len() > MAX_METADATA_TLV_SIZE_V4);
+    }
+
+    #[test]
     fn test_sanitize_rejects_traversal_and_separators() {
         for bad in [
             "..",
@@ -873,6 +900,125 @@ fn build_test_pqe3_file(
             AAD_CHUNK_TYPE_NORMAL
         };
         let aad = build_aad_v3(chunk_type, 0, chunk_index as u64, &header_hash);
+        let nonce = get_nonce(&base_nonce, chunk_index as u64).unwrap();
+        let chunk_ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: chunk,
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+        file_bytes.extend_from_slice(&chunk_ciphertext);
+    }
+
+    if include_trailer {
+        let trailer: [u8; TRAILER_SIZE] = Sha256::digest(&file_bytes).into();
+        file_bytes.extend_from_slice(&trailer);
+    }
+
+    (file_bytes, priv_pem)
+}
+
+/// Builds a real, cryptographically valid PQE4 file plus a matching
+/// plain-text private key PEM, entirely from this module's own internals --
+/// bypassing `encrypt_file`. Mirrors `build_test_pqe3_file` above: same
+/// recipient keypair/DH/header-prefix setup, but the header ends after the
+/// extension region (no metadata-region fields), and `metadata_fields` --
+/// instead of being AEAD-encrypted separately -- is TLV-encoded,
+/// length-prefixed, and prepended to `plaintext` before chunking, exactly as
+/// `encrypt_file_with_segment_size` now does.
+fn build_test_pqe4_file(
+    metadata_fields: &[(u8, &[u8])],
+    plaintext: &[u8],
+    include_trailer: bool,
+) -> (Vec<u8>, String) {
+    use sha2::Digest;
+    use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
+
+    // Recipient keypair
+    let mut key_gen_randomness = [0u8; 64];
+    rand::rng().fill_bytes(&mut key_gen_randomness);
+    let key_pair = mlkem1024::generate_key_pair(key_gen_randomness);
+    let (mlkem_secret, mlkem_public) = key_pair.into_parts();
+
+    let mut x25519_secret_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut x25519_secret_bytes);
+    let x25519_secret = StaticSecret::from(x25519_secret_bytes);
+    let x25519_public = X25519PublicKey::from(&x25519_secret);
+
+    // Plain-text private key PEM (no passphrase), so tests can call
+    // decrypt_file directly without a passphrase prompt.
+    let mut composite_priv = Vec::new();
+    let mlkem_sk_bytes = mlkem_secret.as_slice();
+    composite_priv.extend_from_slice(&(mlkem_sk_bytes.len() as u32).to_be_bytes());
+    composite_priv.extend_from_slice(mlkem_sk_bytes);
+    composite_priv.extend_from_slice(x25519_secret.to_bytes().as_ref());
+    let priv_pem = pem_encode(&composite_priv, PEM_PRIV_BEGIN, PEM_PRIV_END);
+
+    // Encapsulate/DH exactly as encrypt_file does
+    let mut encaps_randomness = [0u8; 32];
+    rand::rng().fill_bytes(&mut encaps_randomness);
+    let (ciphertext, shared_secret) = mlkem1024::encapsulate(&mlkem_public, encaps_randomness);
+
+    let ephemeral_secret = EphemeralSecret::random();
+    let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+    let shared_secret_x25519 = ephemeral_secret.diffie_hellman(&x25519_public);
+
+    let mut combined_secret = Vec::with_capacity(SHARED_SECRET_SIZE);
+    combined_secret.extend_from_slice(&shared_secret);
+    combined_secret.extend_from_slice(shared_secret_x25519.as_bytes());
+
+    let mut salt = [0u8; SALT_SIZE];
+    rand::rng().fill_bytes(&mut salt);
+    let mut base_nonce = [0u8; NONCE_SIZE];
+    rand::rng().fill_bytes(&mut base_nonce);
+
+    let kem_ct_len = ciphertext.as_slice().len() as u32;
+    let mut header = Vec::new();
+    header.extend_from_slice(MAGIC_V4);
+    header.extend_from_slice(&kem_ct_len.to_be_bytes());
+    header.extend_from_slice(ciphertext.as_slice());
+    header.extend_from_slice(ephemeral_public.as_bytes());
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&base_nonce);
+
+    let extension_region = if include_trailer {
+        encode_tlv_fields(&[(EXTENSION_FIELD_CHECKSUM_TRAILER, &[])])
+    } else {
+        encode_tlv_fields(&[])
+    };
+    header.extend_from_slice(&(extension_region.len() as u32).to_be_bytes());
+    header.extend_from_slice(&extension_region);
+
+    // No metadata region: the header ends here for PQE4.
+    let header_hash: [u8; 32] = Sha256::digest(&header).into();
+
+    // Metadata TLV, length-prefixed and prepended to the real plaintext --
+    // this is what makes it the start of chunk 0 once chunked below.
+    let metadata_tlv = encode_tlv_fields(metadata_fields);
+    let mut full_plaintext = Vec::with_capacity(4 + metadata_tlv.len() + plaintext.len());
+    full_plaintext.extend_from_slice(&(metadata_tlv.len() as u32).to_be_bytes());
+    full_plaintext.extend_from_slice(&metadata_tlv);
+    full_plaintext.extend_from_slice(plaintext);
+
+    let body_key = derive_body_key_v3(&combined_secret, &salt, 0).unwrap();
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&body_key.data));
+
+    let mut file_bytes = header;
+    // full_plaintext is never empty (always >= 4 bytes for the length
+    // prefix), unlike build_test_pqe3_file's plaintext, so there's no need
+    // for its empty-plaintext special case here.
+    let chunks: Vec<&[u8]> = full_plaintext.chunks(CHUNK_SIZE).collect();
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        let is_last = chunk_index + 1 == chunks.len();
+        let chunk_type = if is_last {
+            AAD_CHUNK_TYPE_LAST
+        } else {
+            AAD_CHUNK_TYPE_NORMAL
+        };
+        let aad = build_aad(AAD_VERSION_V4, chunk_type, 0, chunk_index as u64, &header_hash);
         let nonce = get_nonce(&base_nonce, chunk_index as u64).unwrap();
         let chunk_ciphertext = cipher
             .encrypt(
@@ -1248,7 +1394,7 @@ mod pqe3_segment_arithmetic_tests {
 // transitions without an 8 GiB fixture -- chunks_per_segment is purely a
 // test-only seam, never part of the on-disk format; production always uses
 // the real CHUNKS_PER_SEGMENT constant via encrypt_file/decrypt_file).
-mod pqe3_format_tests {
+mod format_tests {
     use super::*;
     use tempfile::TempDir;
 
@@ -1294,11 +1440,11 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_encrypt_writes_v3_magic() {
+    fn test_pqe4_encrypt_writes_v4_magic() {
         let dir = TempDir::new().unwrap();
         let (pub_path, _priv_path) = generate_test_keypair(dir.path());
         let input_path = dir.path().join("input.txt");
-        fs::write(&input_path, b"hello pqe3").unwrap();
+        fs::write(&input_path, b"hello pqe4").unwrap();
         let output_path = dir.path().join("output.pqe");
 
         encrypt_file(
@@ -1309,11 +1455,11 @@ mod pqe3_format_tests {
         .unwrap();
 
         let bytes = fs::read(&output_path).unwrap();
-        assert_eq!(&bytes[..4], MAGIC_V3);
+        assert_eq!(&bytes[..4], MAGIC_V4);
     }
 
     #[test]
-    fn test_pqe3_roundtrip_empty() {
+    fn test_pqe4_roundtrip_empty() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let input_path = dir.path().join("empty.bin");
@@ -1339,7 +1485,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_roundtrip_single_chunk() {
+    fn test_pqe4_roundtrip_single_chunk() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let plaintext = vec![0x11u8; 1234];
@@ -1366,7 +1512,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_roundtrip_multichunk_single_segment() {
+    fn test_pqe4_roundtrip_multichunk_single_segment() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let plaintext = vec![0xABu8; 3 * CHUNK_SIZE + 777];
@@ -1393,7 +1539,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_roundtrip_multi_segment_transition() {
+    fn test_pqe4_roundtrip_multi_segment_transition() {
         // chunks_per_segment = 2 with 5 chunks of plaintext (4 full +
         // 1 partial) produces segments of sizes [2, 2, 1] -- a full
         // segment-boundary rekey and a short final segment together.
@@ -1425,7 +1571,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_tampering_chunk_swapped_across_segments() {
+    fn test_pqe4_tampering_chunk_swapped_across_segments() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
@@ -1475,7 +1621,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_tampering_corrupted_final_tag() {
+    fn test_pqe4_tampering_corrupted_final_tag() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
@@ -1514,7 +1660,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_pqe3_tampering_truncated_body() {
+    fn test_pqe4_tampering_truncated_body() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let plaintext = vec![0x5Au8; 4 * CHUNK_SIZE + 555];
@@ -1544,16 +1690,16 @@ mod pqe3_format_tests {
         );
         assert!(
             result.is_err(),
-            "truncated PQE3 body must be rejected cleanly, not panic"
+            "truncated PQE4 body must be rejected cleanly, not panic"
         );
     }
 
     #[test]
-    fn test_pqe3_tampering_corrupted_checksum_trailer() {
+    fn test_pqe4_tampering_corrupted_checksum_trailer() {
         let dir = TempDir::new().unwrap();
         let (pub_path, priv_path) = generate_test_keypair(dir.path());
         let input_path = dir.path().join("trailer_in.bin");
-        fs::write(&input_path, b"some pqe3 content").unwrap();
+        fs::write(&input_path, b"some pqe4 content").unwrap();
         let output_path = dir.path().join("trailer.pqe");
 
         encrypt_file(
@@ -1584,7 +1730,7 @@ mod pqe3_format_tests {
     }
 
     #[test]
-    fn test_verify_open_file_recognizes_pqe3() {
+    fn test_verify_open_file_recognizes_pqe4() {
         let dir = TempDir::new().unwrap();
         let (pub_path, _priv_path) = generate_test_keypair(dir.path());
         let input_path = dir.path().join("verify_in.bin");
@@ -1600,11 +1746,78 @@ mod pqe3_format_tests {
 
         let mut fin = File::open(&output_path).unwrap();
         let verified = verify_open_file(&mut fin, output_path.to_str().unwrap()).unwrap();
-        assert_eq!(&verified.parsed.header_bytes[..4], MAGIC_V3);
+        assert_eq!(&verified.parsed.header_bytes[..4], MAGIC_V4);
+        assert_eq!(verified.parsed.format, FileFormat::V4);
     }
 
     #[test]
-    fn test_decrypt_rejects_traversal_in_embedded_filename() {
+    fn test_verify_open_file_recognizes_pqe3() {
+        // Legacy format, built directly via build_test_pqe3_file rather
+        // than the real encrypt_file (which only ever writes PQE4 now) --
+        // pairs with test_verify_open_file_recognizes_pqe4 above to make
+        // verify's dual-format support an explicit, named assertion.
+        let (file_bytes, _priv_pem) = build_test_pqe3_file(&[], b"legacy verify me", true);
+        let dir = TempDir::new().unwrap();
+        let input_path = dir.path().join("legacy_verify.pqe");
+        fs::write(&input_path, &file_bytes).unwrap();
+
+        let mut fin = File::open(&input_path).unwrap();
+        let verified = verify_open_file(&mut fin, input_path.to_str().unwrap()).unwrap();
+        assert_eq!(&verified.parsed.header_bytes[..4], MAGIC_V3);
+        assert_eq!(verified.parsed.format, FileFormat::V3);
+    }
+
+    #[test]
+    fn test_pqe3_legacy_file_decrypts_after_pqe4_migration() {
+        // encrypt_file only ever writes PQE4 now, but decrypt_file must
+        // still accept a genuine PQE3 file (hand-built via
+        // build_test_pqe3_file, independent of whatever encrypt_file
+        // currently emits), including recovering its embedded filename and
+        // timestamps -- the dual-format guarantee, as an explicit, named
+        // regression test rather than an incidental byproduct of other
+        // traversal/trailer-focused tests.
+        let dir = TempDir::new().unwrap();
+        let mtime_bytes = encode_timestamp(filetime::FileTime::from_unix_time(1_700_000_000, 0));
+        let atime_bytes = encode_timestamp(filetime::FileTime::from_unix_time(1_700_000_100, 0));
+        let (file_bytes, priv_pem) = build_test_pqe3_file(
+            &[
+                (METADATA_FIELD_FILENAME, b"legacy_report.txt"),
+                (METADATA_FIELD_MTIME, &mtime_bytes),
+                (METADATA_FIELD_ATIME, &atime_bytes),
+            ],
+            b"legacy pqe3 content",
+            true,
+        );
+
+        let input_path = dir.path().join("legacy.pqe");
+        fs::write(&input_path, &file_bytes).unwrap();
+        let priv_path = dir.path().join("priv.pem");
+        fs::write(&priv_path, &priv_pem).unwrap();
+
+        decrypt_file(input_path.to_str().unwrap(), None, priv_path.to_str().unwrap(), None)
+            .unwrap();
+
+        let restored_path = dir.path().join("legacy_report.txt");
+        assert!(
+            restored_path.exists(),
+            "expected output restored via embedded PQE3 filename at {:?}",
+            restored_path
+        );
+        assert_eq!(fs::read(&restored_path).unwrap(), b"legacy pqe3 content");
+
+        let restored_meta = fs::metadata(&restored_path).unwrap();
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&restored_meta),
+            filetime::FileTime::from_unix_time(1_700_000_000, 0)
+        );
+        assert_eq!(
+            filetime::FileTime::from_last_access_time(&restored_meta),
+            filetime::FileTime::from_unix_time(1_700_000_100, 0)
+        );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_traversal_in_embedded_filename_pqe3() {
         // SECURITY: a hostile sender (anyone holding the recipient's
         // public key) embeds a path-traversal filename. Decrypt must
         // never honor it -- it must fall back to .pqe-suffix stripping,
@@ -1645,6 +1858,54 @@ mod pqe3_format_tests {
 
         // The naive traversal target ("../../evil" joined onto the
         // input's directory, i.e. two levels up) must never be created.
+        let traversal_target = dir.path().parent().unwrap().join("evil");
+        assert!(
+            !traversal_target.exists(),
+            "path traversal target must not exist: {:?}",
+            traversal_target
+        );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_traversal_in_embedded_filename_pqe4() {
+        // Same guarantee as the PQE3 version above, but through PQE4's
+        // entirely different metadata code path: chunk 0 is decrypted and
+        // manually split (main.rs's decrypt_file_with_segment_size,
+        // FileFormat::V4 arm) instead of a standalone metadata AEAD call,
+        // so this isn't redundant coverage -- it exercises different code.
+        let dir = TempDir::new().unwrap();
+        let (file_bytes, priv_pem) = build_test_pqe4_file(
+            &[(METADATA_FIELD_FILENAME, b"../../evil")],
+            b"malicious sender content",
+            true,
+        );
+
+        let sub_dir = dir.path().join("archive");
+        fs::create_dir(&sub_dir).unwrap();
+        let input_path = sub_dir.join("backup.pqe");
+        fs::write(&input_path, &file_bytes).unwrap();
+        let priv_path = dir.path().join("priv.pem");
+        fs::write(&priv_path, &priv_pem).unwrap();
+
+        let result = decrypt_file(
+            input_path.to_str().unwrap(),
+            None,
+            priv_path.to_str().unwrap(),
+            None,
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let expected_output = sub_dir.join("backup");
+        assert!(
+            expected_output.exists(),
+            "expected fallback output at {:?}",
+            expected_output
+        );
+        assert_eq!(
+            fs::read(&expected_output).unwrap(),
+            b"malicious sender content"
+        );
+
         let traversal_target = dir.path().parent().unwrap().join("evil");
         assert!(
             !traversal_target.exists(),

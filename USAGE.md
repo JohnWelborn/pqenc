@@ -92,12 +92,12 @@ may leave the placeholder behind, but pqenc recognizes its own placeholders
 and safely reclaims them on the next attempt to the same path, so retries are
 not permanently blocked.
 
-`pqenc encrypt` always writes the current file format, `PQE3`: plaintext is
+`pqenc encrypt` always writes the current file format, `PQE4`: plaintext is
 divided into fixed 8 GiB segments, each encrypted under its own independently
 HKDF-derived AES-256-GCM key, so no single key ever encrypts more than 8 GiB
-even for very large backups. `pqenc decrypt` and `pqenc verify` only accept
-`PQE3`; files encrypted by an older `pqenc` release must be decrypted with
-that older release before upgrading.
+even for very large backups. `pqenc decrypt` and `pqenc verify` also accept
+the older `PQE3` format, so files encrypted by a pre-PQE4 `pqenc` release
+keep working without needing that older release.
 
 ## 4. Check backup integrity without the private key (optional, cron-friendly)
 
