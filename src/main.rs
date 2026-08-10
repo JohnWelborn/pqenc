@@ -1928,6 +1928,25 @@ fn combine_secrets(
     SensitiveData::new(combined)
 }
 
+/// Reads from `r` into `buf` until `buf` is completely full or `r` hits EOF,
+/// looping since a single `read()` call is not guaranteed to fill the
+/// buffer. Returns the number of bytes actually filled (less than
+/// `buf.len()` iff EOF was hit first). Shared by the encrypt and decrypt
+/// chunk-read loops; takes `&mut dyn Read` rather than a generic `impl Read`
+/// because those loops read from different concrete types (`Box<dyn Read>`
+/// vs `File`).
+fn fill_buffer(r: &mut dyn Read, buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = r.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
 /// Encrypts a file using ML-KEM-1024 + X25519 + AES-256-GCM, always writing
 /// the current format (PQE3). See `encrypt_file_with_segment_size` for the
 /// real implementation; this is a thin wrapper pinning `chunks_per_segment`
@@ -2162,25 +2181,11 @@ fn encrypt_file_with_segment_size(
     let mut next_chunk = vec![0u8; CHUNK_SIZE];
 
     // Read first chunk - loop to fill buffer completely (or until EOF)
-    let mut n_current = 0;
-    while n_current < CHUNK_SIZE {
-        let n = fin.read(&mut current_chunk[n_current..])?;
-        if n == 0 {
-            break;
-        }
-        n_current += n;
-    }
+    let mut n_current = fill_buffer(&mut fin, &mut current_chunk)?;
 
     loop {
         // Read next chunk - loop to fill buffer completely (or until EOF)
-        let mut n_next = 0;
-        while n_next < CHUNK_SIZE {
-            let n = fin.read(&mut next_chunk[n_next..])?;
-            if n == 0 {
-                break;
-            }
-            n_next += n;
-        }
+        let n_next = fill_buffer(&mut fin, &mut next_chunk)?;
 
         let chunk_type = if n_next == 0 {
             AAD_CHUNK_TYPE_LAST
@@ -2666,16 +2671,8 @@ fn decrypt_file_with_segment_size(
             let read_target = std::cmp::min(encrypted_chunk_size as u64, remaining) as usize;
 
             // Read up to read_target.
-            // We loop to ensure we fill the buffer if possible, though for local files read() usually suffices.
             let mut buffer = vec![0u8; read_target];
-            let mut bytes_read = 0;
-            while bytes_read < read_target {
-                let n = fin.read(&mut buffer[bytes_read..])?;
-                if n == 0 {
-                    break;
-                }
-                bytes_read += n;
-            }
+            let bytes_read = fill_buffer(&mut fin, &mut buffer)?;
 
             if bytes_read == 0 {
                 break;
