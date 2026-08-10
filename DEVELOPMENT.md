@@ -7,6 +7,7 @@ cargo upgrade --incompatible
 cargo test
 cargo audit
 cargo deny check
+cargo sbom > sbom.json
 ```
 
 Review changelogs for crypto crates before committing:
