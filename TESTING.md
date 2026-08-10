@@ -31,7 +31,7 @@ cargo test --test verify_tests
 # Property-based tests only (randomized inputs)
 cargo test --test property_tests
 
-# CLI tests only (directory encryption via tar piping, Unix only)
+# CLI tests only (directory encryption, native and tar-piping, Unix only)
 cargo test --test cli_encrypt_dir
 ```
 
@@ -122,7 +122,16 @@ automatic verify preflight:
   before paying for the full-file scan
 
 ### CLI Tests (`tests/cli_encrypt_dir.rs`)
-Tests directory encryption via tar piping (Unix only):
+Tests directory encryption, both native and via tar piping (Unix only):
+- Native `pqenc encrypt mydir` with default output naming (`mydir.tar.gz.pqe`),
+  decrypting back to `mydir.tar.gz` with no `--output` needed
+- Native encryption with an explicit `--output` that differs from the
+  embedded name, confirming decrypt still uses the embedded name
+- A symlink inside the directory is preserved as a symlink, not dereferenced,
+  through a full round trip
+- Multi-file directory content spanning several encryption chunks
+- An archiving failure (e.g. an unreadable file inside the directory) leaves
+  no partial output file behind
 - Encrypt a directory using `tar czf - dir | pqenc encrypt /dev/stdin`
 - Encrypt a directory using the `-` stdin shorthand
 

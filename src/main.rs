@@ -402,8 +402,8 @@ Examples:
   # Decrypt a file
   pqenc decrypt secret.enc --output secret.txt --private-key priv.key
 
-  # Encrypt a directory (tar+gzip into a single compressed archive)
-  tar czf - mydir | pqenc encrypt /dev/stdin --output mydir.tar.gz.pqe --public-key pub.key
+  # Encrypt a directory (decrypts to a tar+gzip archive)
+  pqenc encrypt mydir --output secret.pqe --public-key pub.key
 
   # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.enc
@@ -434,11 +434,18 @@ enum Commands {
         )]
         passphrase: Option<String>,
     },
-    #[command(about = "Encrypt a file using a public key")]
+    #[command(about = "Encrypt a file or directory using a public key")]
     Encrypt {
-        #[arg(help = "Input file to encrypt (use \"-\" or /dev/stdin to read from a pipe)")]
+        #[arg(
+            help = "Input file or directory to encrypt (use \"-\" or /dev/stdin to read from a pipe). \
+            A directory is streamed as an internal tar+gzip archive; the plaintext archive is never written to disk."
+        )]
         input: String,
-        #[arg(long, short = 'o', help = "Output file (default: <input>.pqe)")]
+        #[arg(
+            long,
+            short = 'o',
+            help = "Output file (default: <input>.pqe for a file, or <dirname>.tar.gz.pqe for a directory)"
+        )]
         output: Option<String>,
         #[arg(long, short = 'p')]
         public_key: String,
@@ -1763,14 +1770,46 @@ fn sanitize_embedded_filename(raw: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
-/// Resolves the encrypt output path when `-o` was omitted: `<input>.pqe`.
-/// Bails if input is stdin -- there's no filename to derive a default from.
+/// Extracts a directory path's final component as an owned `String`, for use
+/// as both the tar archive's internal top-level name and the embedded
+/// metadata filename (`<name>.tar.gz`) in `encrypt_file_with_segment_size`'s
+/// directory branch -- callers must use this instead of computing the
+/// basename themselves, so the tar's own internal name always matches the
+/// embedded name decrypt later derives its default output from.
+///
+/// Fails closed (rather than falling back to some placeholder) for a path
+/// with no usable final component (`.`, `..`, `/`, empty) -- unlike a cosmetic
+/// error-message string, this value drives real naming decisions.
+fn directory_basename(dir_path: &str) -> Result<String> {
+    std::path::Path::new(dir_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot determine a name for directory '{}': pass an explicit --output",
+                dir_path
+            )
+        })
+}
+
+/// Resolves the encrypt output path when `-o` was omitted: `<input>.pqe` for
+/// a file, or `<input>.tar.gz.pqe` for a directory (trailing path separators
+/// trimmed first, so `mydir/` behaves the same as `mydir`) -- in both cases
+/// keeping whatever path prefix the user typed, exactly like the file case
+/// already does, rather than collapsing to a bare basename in the current
+/// directory. Bails if input is stdin -- there's no filename to derive a
+/// default from.
 fn resolve_encrypt_output(input_path: &str, output: Option<String>) -> Result<String> {
     match output {
         Some(o) => Ok(o),
         None => {
             if is_stdin_path(input_path) {
                 bail!("--output is required when reading from stdin");
+            }
+            if std::path::Path::new(input_path).is_dir() {
+                let trimmed = input_path.trim_end_matches(['/', '\\']);
+                return Ok(format!("{trimmed}.tar.gz.pqe"));
             }
             Ok(format!("{}.pqe", input_path))
         }
@@ -2092,26 +2131,16 @@ fn encrypt_file_with_segment_size(
     use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
     let is_stdin = is_stdin_path(input_path);
+    let input_p = std::path::Path::new(input_path);
+    let is_dir = !is_stdin && input_p.is_dir();
 
-    // Check if input is a directory (skip for stdin)
-    if !is_stdin {
-        let input_p = std::path::Path::new(input_path);
-        if input_p.exists() && input_p.is_dir() {
-            let dirname = input_p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(input_path);
-            bail!(
-                "Input file is a directory, not a file: {}\n\n\
-                pqenc can only encrypt individual files. To encrypt a directory:\n\
-                tar czf - {} | pqenc encrypt /dev/stdin --output {}.tar.gz.pqe --public-key {}",
-                input_path, dirname, dirname, public_key_path
-            );
-        }
+    // Validate all paths (allow stdin for input). validate_path unconditionally
+    // rejects directories, so the input-path call is skipped for a directory
+    // input -- output-path and public-key-path are never expected to be
+    // directories and keep rejecting them.
+    if !is_dir {
+        validate_path(input_path, true, true, "Input file")?;
     }
-
-    // Validate all paths (allow stdin for input)
-    validate_path(input_path, true, true, "Input file")?;
     validate_path(output_path, false, false, "Output file")?;
     validate_path(public_key_path, true, false, "Public key")?;
 
@@ -2164,9 +2193,62 @@ fn encrypt_file_with_segment_size(
     // lazily, inside BodyCipherProvider once the header (and therefore
     // header_hash) is known below.
 
-    let mut fin = open_input(input_path)?;
-    let (input_size, source_metadata) = if is_stdin {
-        (None, None)
+    // Set only for a directory input: joined (and its result checked) after
+    // the chunk loop below reaches EOF, before anything is committed to
+    // `output_path` -- see the join-site comment further down for why.
+    let mut archive_join_handle: Option<std::thread::JoinHandle<std::io::Result<()>>> = None;
+
+    let (mut fin, input_size, source_metadata): (
+        Box<dyn Read>,
+        Option<u64>,
+        Option<SourceMetadata>,
+    ) = if is_dir {
+        // Archive the directory into a tar+gzip stream on a background
+        // thread, feeding it through an OS pipe into the same chunked
+        // reader the file/stdin cases use below -- the plaintext archive
+        // is never buffered in memory or written to disk. The pipe's
+        // small kernel buffer gives natural backpressure: the archiving
+        // thread blocks on `write` whenever the main thread's chunk loop
+        // hasn't drained the pipe yet.
+        let dirname = directory_basename(input_path)?;
+        let archive_name = format!("{dirname}.tar.gz");
+        let dir_path = input_p.to_path_buf();
+        let (reader, writer) =
+            std::io::pipe().context("Failed to create pipe for directory archiving")?;
+        let handle = std::thread::Builder::new()
+            .name("pqenc-archive".into())
+            .spawn(move || -> std::io::Result<()> {
+                let enc = flate2::write::GzEncoder::new(writer, flate2::Compression::default());
+                let mut builder = tar::Builder::new(enc);
+                // GNU tar's actual default: store symlinks as symlinks
+                // rather than dereferencing them. The tar crate's own
+                // default is the opposite (follow_symlinks: true), which
+                // would silently archive file content from wherever a
+                // symlink inside the directory happens to point.
+                builder.follow_symlinks(false);
+                builder.append_dir_all(&dirname, &dir_path)?;
+                let enc = builder.into_inner()?;
+                enc.finish()?;
+                Ok(())
+            })
+            .context("Failed to spawn directory-archiving thread")?;
+        archive_join_handle = Some(handle);
+        // No single mtime/atime is meaningful for a directory as a whole
+        // (each file's own mtime/permissions are preserved inside its
+        // own tar entry by append_dir_all); "now" is the least surprising
+        // choice for pqenc's own outer metadata.
+        let now = filetime::FileTime::now();
+        (
+            Box::new(reader),
+            None,
+            Some(SourceMetadata {
+                filename: Some(archive_name),
+                mtime: now,
+                atime: now,
+            }),
+        )
+    } else if is_stdin {
+        (open_input(input_path)?, None, None)
     } else {
         let meta = File::open(input_path)?.metadata()?;
         let filename = std::path::Path::new(input_path)
@@ -2175,6 +2257,7 @@ fn encrypt_file_with_segment_size(
         let mtime = filetime::FileTime::from_last_modification_time(&meta);
         let atime = filetime::FileTime::from_last_access_time(&meta);
         (
+            open_input(input_path)?,
             Some(meta.len()),
             Some(SourceMetadata {
                 filename,
@@ -2324,6 +2407,27 @@ fn encrypt_file_with_segment_size(
         n_current = n_next;
     }
 
+    // For a directory input, `fin` reaching EOF only proves the archiving
+    // thread's pipe writer was dropped -- which also happens if it errored
+    // out partway through the walk, leaving a truncated archive that would
+    // otherwise look like a complete, valid file to the loop above. Check
+    // before doing any more work (the trailer hash, the fsync, the rename)
+    // for a run that needs to be aborted anyway. By the time EOF is
+    // observed the writer is already gone, so this join is a near-instant
+    // reap, never a real wait. This runs well before `fs::rename` below,
+    // with both guards still fully armed, so a failure here is just one
+    // more ordinary pre-rename early return -- it doesn't touch the
+    // no-fallible-operations zone between the rename and the two disarms.
+    if let Some(handle) = archive_join_handle {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(io_err)) => return Err(io_err).context("Failed to archive input directory"),
+            Err(_panic) => {
+                bail!("Directory-archiving thread panicked while building the tar archive")
+            }
+        }
+    }
+
     let trailer: [u8; TRAILER_SIZE] = trailer_hasher.finalize().into();
     fout.write_all(&trailer)?;
 
@@ -2348,6 +2452,15 @@ fn encrypt_file_with_segment_size(
     println!("File encrypted successfully");
     if let Some(size) = input_size {
         println!("  Input:  {} ({} bytes)", input_path, size);
+    } else if is_dir {
+        let archive_name = source_metadata
+            .as_ref()
+            .and_then(|m| m.filename.as_deref())
+            .unwrap_or("?");
+        println!(
+            "  Input:  {} (directory, streamed as {})",
+            input_path, archive_name
+        );
     } else {
         println!("  Input:  {} (stdin)", input_path);
     }

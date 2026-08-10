@@ -45,6 +45,10 @@ rpassword = "7.5"
 # Restoring original file modification/access times on decrypt
 filetime = "0.2"
 
+# Streaming tar+gzip archiving for directory encryption
+tar = { version = "0.4", default-features = false }
+flate2 = "1.0"
+
 [dev-dependencies]
 # Property-based testing
 proptest = "1.11"

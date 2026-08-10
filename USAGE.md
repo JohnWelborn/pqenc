@@ -73,7 +73,21 @@ whichever check you use whenever you replace or move either key file.
 # Encrypt a single file
 pqenc encrypt --public-key pub.key data.tar.gz --output data.tar.gz.pqe
 
-# Encrypt a directory without writing plaintext to disk
+# Encrypt a directory (decrypts to a tar+gzip archive)
+pqenc encrypt /path/to/data --public-key pub.key --output backup.tar.gz.pqe
+```
+
+Decrypting `backup.tar.gz.pqe` (with no `--output`) produces `backup.tar.gz`, ready
+for a normal `tar xzf`. The archiving happens on a background thread and is piped
+directly into the encryption stream -- the plaintext archive is never buffered in
+memory or written to disk, only the individual files that already exist unencrypted
+in `/path/to/data`.
+
+If you're streaming a `tar` from somewhere pqenc can't read directly -- piped over
+`ssh` from a remote host, or built with flags pqenc's own archiving doesn't expose
+-- the older stdin form still works exactly as before:
+
+```bash
 tar czf - /path/to/data | pqenc encrypt --public-key pub.key - --output backup.tar.gz.pqe
 ```
 

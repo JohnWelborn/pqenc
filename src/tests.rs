@@ -590,6 +590,7 @@ mod fingerprint_tests {
 // crypto or file I/O involved.
 mod metadata_tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_tlv_roundtrip() {
@@ -755,6 +756,56 @@ mod metadata_tests {
     fn test_resolve_encrypt_output_rejects_stdin_without_explicit_output() {
         assert!(resolve_encrypt_output("-", None).is_err());
         assert!(resolve_encrypt_output("/dev/stdin", None).is_err());
+    }
+
+    #[test]
+    fn test_resolve_encrypt_output_defaults_directory_to_tar_gz_pqe_suffix() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("mydir");
+        fs::create_dir(&sub).unwrap();
+        assert_eq!(
+            resolve_encrypt_output(sub.to_str().unwrap(), None).unwrap(),
+            format!("{}.tar.gz.pqe", sub.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_resolve_encrypt_output_directory_trailing_slash_matches_without() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("mydir");
+        fs::create_dir(&sub).unwrap();
+        let with_slash = format!("{}/", sub.to_str().unwrap());
+        assert_eq!(
+            resolve_encrypt_output(&with_slash, None).unwrap(),
+            format!("{}.tar.gz.pqe", sub.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_resolve_encrypt_output_directory_input_still_honors_explicit_output() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("mydir");
+        fs::create_dir(&sub).unwrap();
+        assert_eq!(
+            resolve_encrypt_output(sub.to_str().unwrap(), Some("explicit.pqe".to_string()))
+                .unwrap(),
+            "explicit.pqe"
+        );
+    }
+
+    #[test]
+    fn test_directory_basename_extracts_final_component() {
+        assert_eq!(directory_basename("mydir").unwrap(), "mydir");
+        assert_eq!(directory_basename("mydir/").unwrap(), "mydir");
+        assert_eq!(directory_basename("path/to/mydir").unwrap(), "mydir");
+        assert_eq!(directory_basename("path/to/mydir/").unwrap(), "mydir");
+    }
+
+    #[test]
+    fn test_directory_basename_rejects_paths_without_a_usable_name() {
+        for bad in [".", "..", "/", ""] {
+            assert!(directory_basename(bad).is_err(), "should reject {:?}", bad);
+        }
     }
 
     #[test]

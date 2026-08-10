@@ -40,10 +40,10 @@ pqenc encrypt bank.txt -p pub.key -o secret.pqe
 pqenc decrypt secret.pqe -s priv.key
 ```
 
-**Encrypting a directory (tar+gzip into a single compressed archive):**
+**Encrypting a directory (tar+gzip streamed internally, never written to disk):**
 
 ```bash
-tar czf - mydir | pqenc encrypt /dev/stdin --output secret.pqe -p pub.key
+pqenc encrypt mydir -p pub.key
 ```
 
 ## Features
