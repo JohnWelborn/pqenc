@@ -59,7 +59,7 @@ fn benchmark_encryption_sizes(c: &mut Criterion) {
     for size in [1024, 64 * 1024, 256 * 1024, 1024 * 1024].iter() {
         let data = vec![0u8; *size];
         let input_path = temp_dir.join(format!("bench_input_{}.bin", size));
-        let output_path = temp_dir.join(format!("bench_output_{}.enc", size));
+        let output_path = temp_dir.join(format!("bench_output_{}.pqe", size));
         fs::write(&input_path, &data).unwrap();
 
         group.bench_with_input(
@@ -99,7 +99,7 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
     for size in [1024, 64 * 1024, 256 * 1024, 1024 * 1024].iter() {
         let data = vec![0u8; *size];
         let input_path = temp_dir.join(format!("bench_dec_input_{}.bin", size));
-        let encrypted_path = temp_dir.join(format!("bench_dec_encrypted_{}.enc", size));
+        let encrypted_path = temp_dir.join(format!("bench_dec_encrypted_{}.pqe", size));
         let output_path = temp_dir.join(format!("bench_dec_output_{}.bin", size));
 
         fs::write(&input_path, &data).unwrap();

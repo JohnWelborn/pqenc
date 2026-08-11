@@ -23,7 +23,7 @@ fn test_truncation_attack_detected() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for truncation");
-    let encrypted_path = env.file_path("test.enc");
+    let encrypted_path = env.file_path("test.pqe");
 
     // Encrypt
     let output = Command::new(pqenc_binary())
@@ -66,7 +66,7 @@ fn test_bit_flip_detected() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for bit flip");
-    let encrypted_path = env.file_path("test.enc");
+    let encrypted_path = env.file_path("test.pqe");
 
     // Encrypt
     let output = Command::new(pqenc_binary())
@@ -109,8 +109,8 @@ fn test_encryption_is_nondeterministic() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"same data");
-    let enc1_path = env.file_path("enc1.enc");
-    let enc2_path = env.file_path("enc2.enc");
+    let enc1_path = env.file_path("enc1.pqe");
+    let enc2_path = env.file_path("enc2.pqe");
 
     // Encrypt twice with same data
     for enc_path in [&enc1_path, &enc2_path] {
@@ -219,7 +219,7 @@ fn test_invalid_magic_bytes_rejected() {
     let mut bad_data = b"XXX1".to_vec();
     bad_data.extend_from_slice(&[0u8; 2000]); // Minimum plausible size
 
-    let bad_path = env.create_file("bad.enc", &bad_data);
+    let bad_path = env.create_file("bad.pqe", &bad_data);
     let out_path = env.file_path("out.txt");
 
     let result = env.decrypt_file_with_passphrase(
@@ -237,7 +237,7 @@ fn test_header_tampering_detected() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data");
-    let encrypted_path = env.file_path("test.enc");
+    let encrypted_path = env.file_path("test.pqe");
 
     // Encrypt
     let output = Command::new(pqenc_binary())
@@ -281,7 +281,7 @@ fn test_ciphertext_tampering_detected() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test data for ciphertext tampering");
-    let encrypted_path = env.file_path("test.enc");
+    let encrypted_path = env.file_path("test.pqe");
 
     // Encrypt
     let output = Command::new(pqenc_binary())

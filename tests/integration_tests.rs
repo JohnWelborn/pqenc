@@ -23,7 +23,7 @@ fn test_full_workflow_small_file() {
 
     let input_data = TestData::text("Hello, post-quantum world!");
     let input_path = env.create_file("input.txt", &input_data.plaintext);
-    let encrypted_path = env.file_path("encrypted.enc");
+    let encrypted_path = env.file_path("encrypted.pqe");
     let decrypted_path = env.file_path("decrypted.txt");
 
     // Encrypt
@@ -109,7 +109,7 @@ fn test_empty_file() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("empty.txt", b"");
-    let encrypted_path = env.file_path("empty.enc");
+    let encrypted_path = env.file_path("empty.pqe");
     let decrypted_path = env.file_path("empty_dec.txt");
 
     // Encrypt
@@ -146,7 +146,7 @@ fn test_exactly_one_chunk() {
 
     let data = vec![0x42; 64 * 1024];
     let input_path = env.create_file("onechunk.bin", &data);
-    let encrypted_path = env.file_path("onechunk.enc");
+    let encrypted_path = env.file_path("onechunk.pqe");
     let decrypted_path = env.file_path("onechunk_dec.bin");
 
     // Encrypt
@@ -183,7 +183,7 @@ fn test_wrong_passphrase_fails() {
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
-    let encrypted_path = env.file_path("secret.enc");
+    let encrypted_path = env.file_path("secret.pqe");
     let decrypted_path = env.file_path("secret_dec.txt");
 
     // Encrypt
@@ -231,7 +231,7 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
-    let encrypted_path = env.file_path("secret.enc");
+    let encrypted_path = env.file_path("secret.pqe");
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
@@ -277,7 +277,7 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
 
     let data = b"secret data";
     let input_path = env.create_file("secret.txt", data);
-    let encrypted_path = env.file_path("secret.enc");
+    let encrypted_path = env.file_path("secret.pqe");
     let decrypted_path = env.file_path("secret_dec.txt");
 
     let output = Command::new(pqenc_binary())
@@ -322,7 +322,7 @@ fn test_file_format_has_magic_bytes() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("test.txt", b"test");
-    let encrypted_path = env.file_path("test.enc");
+    let encrypted_path = env.file_path("test.pqe");
 
     // Encrypt
     let output = Command::new(pqenc_binary())
@@ -474,7 +474,7 @@ fn test_large_file_multiple_chunks() {
 
     let data = TestData::random(10 * 1024 * 1024); // 10MB - multiple chunks
     let input_path = env.create_file("large.bin", &data.plaintext);
-    let encrypted_path = env.file_path("large.enc");
+    let encrypted_path = env.file_path("large.pqe");
     let decrypted_path = env.file_path("large_dec.bin");
 
     // Encrypt
@@ -524,7 +524,7 @@ fn test_exact_multiple_of_chunk_size_with_trailer() {
     let chunk_size = 64 * 1024;
     let data = TestData::random(2 * chunk_size);
     let input_path = env.create_file("twochunk.bin", &data.plaintext);
-    let encrypted_path = env.file_path("twochunk.enc");
+    let encrypted_path = env.file_path("twochunk.pqe");
     let decrypted_path = env.file_path("twochunk_dec.bin");
 
     let output = Command::new(pqenc_binary())
@@ -573,7 +573,7 @@ fn test_encrypt_refuses_existing_output() {
 
     // Occupy the output path with content we can recognize afterwards.
     const SENTINEL: &[u8] = b"pre-existing file that must not be touched";
-    let encrypted_path = env.create_file("occupied.enc", SENTINEL);
+    let encrypted_path = env.create_file("occupied.pqe", SENTINEL);
 
     let output = Command::new(pqenc_binary())
         .args([
@@ -615,7 +615,7 @@ fn test_encrypt_success_leaves_no_temp_file() {
 
     let data = TestData::random(256 * 1024); // spans multiple 64KB chunks
     let input_path = env.create_file("input.bin", &data.plaintext);
-    let encrypted_path = env.file_path("clean.enc");
+    let encrypted_path = env.file_path("clean.pqe");
     let decrypted_path = env.file_path("clean_dec.bin");
 
     let output = Command::new(pqenc_binary())
@@ -664,7 +664,7 @@ fn test_encrypted_output_permissions() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("input.txt", b"permission check");
-    let encrypted_path = env.file_path("perms.enc");
+    let encrypted_path = env.file_path("perms.pqe");
 
     let output = Command::new(pqenc_binary())
         .args([
@@ -718,7 +718,7 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
 
     let env = TempTestEnv::new();
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
-    let encrypted_path = env.file_path("interrupted.enc");
+    let encrypted_path = env.file_path("interrupted.pqe");
     let dir = encrypted_path.parent().unwrap().to_path_buf();
 
     let mut child = Command::new(pqenc_binary())
@@ -744,7 +744,7 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
     });
 
     // Wait until encryption is genuinely underway: the pre-fix build grows
-    // `interrupted.enc`, the post-fix build grows a `.tmp.` sibling.
+    // `interrupted.pqe`, the post-fix build grows a `.tmp.` sibling.
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let output_started = fs::metadata(&encrypted_path)
@@ -1221,7 +1221,7 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let input_path = env.create_file("input.txt", b"hello");
-    let encrypted_path = env.file_path("input.enc");
+    let encrypted_path = env.file_path("input.pqe");
 
     let encrypt_output = Command::new(pqenc_binary())
         .args([

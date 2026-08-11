@@ -1103,7 +1103,7 @@ mod claim_output_and_temp_tests {
     #[test]
     fn test_claim_output_and_temp_does_not_create_temp_file() {
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
 
         let (output_guard, temp_path) =
             claim_output_and_temp(output_path.to_str().unwrap(), "test claim context").unwrap();
@@ -1125,7 +1125,7 @@ mod claim_output_and_temp_tests {
         // the exact random temp path claim_output_and_temp generated,
         // before this process gets to claim it.
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
 
         let (output_guard, temp_path) =
             claim_output_and_temp(output_path.to_str().unwrap(), "test claim context").unwrap();
@@ -1185,7 +1185,7 @@ mod reservation_reclaim_tests {
     #[test]
     fn test_stale_marker_placeholder_is_reclaimed_and_claim_succeeds() {
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
 
         fs::write(&output_path, RESERVATION_MARKER).unwrap();
         backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
@@ -1213,7 +1213,7 @@ mod reservation_reclaim_tests {
         // entire run. Without the age gate this would be wrongly reclaimed
         // out from under it.
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
         fs::write(&output_path, RESERVATION_MARKER).unwrap();
 
         let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
@@ -1231,7 +1231,7 @@ mod reservation_reclaim_tests {
     #[test]
     fn test_unrelated_content_same_length_is_not_reclaimed() {
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
 
         let sentinel = vec![b'X'; RESERVATION_MARKER.len()];
         fs::write(&output_path, &sentinel).unwrap();
@@ -1249,7 +1249,7 @@ mod reservation_reclaim_tests {
     #[test]
     fn test_unrelated_content_different_length_is_not_reclaimed() {
         let dir = TempDir::new().unwrap();
-        let output_path = dir.path().join("output.enc");
+        let output_path = dir.path().join("output.pqe");
 
         const SENTINEL: &[u8] = b"short";
         fs::write(&output_path, SENTINEL).unwrap();
@@ -1270,7 +1270,7 @@ mod reservation_reclaim_tests {
         fs::write(&target_path, RESERVATION_MARKER).unwrap();
         backdate(&target_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
 
-        let link_path = dir.path().join("output.enc");
+        let link_path = dir.path().join("output.pqe");
         symlink(&target_path, &link_path).unwrap();
 
         let result = claim_output_and_temp(link_path.to_str().unwrap(), "test claim context");

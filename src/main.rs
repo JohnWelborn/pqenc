@@ -397,16 +397,16 @@ Examples:
   pqenc generate-keys --public-key pub.key --private-key priv.key
 
   # Encrypt a file
-  pqenc encrypt secret.txt --output secret.enc --public-key pub.key
+  pqenc encrypt secret.txt --output secret.pqe --public-key pub.key
 
   # Decrypt a file
-  pqenc decrypt secret.enc --output secret.txt --private-key priv.key
+  pqenc decrypt secret.pqe --output secret.txt --private-key priv.key
 
   # Encrypt a directory (decrypts to a tar+gzip archive)
   pqenc encrypt mydir --output secret.pqe --public-key pub.key
 
   # Check an encrypted file for corruption (does not detect tampering)
-  pqenc verify secret.enc
+  pqenc verify secret.pqe
 
   # Show a key's fingerprint and randomart
   pqenc fingerprint pub.key
@@ -2292,7 +2292,7 @@ fn encrypt_file_with_segment_size(
     // "already exists" rejection and prevents TOCTOU/symlink attacks, and it
     // reserves the name for the duration of the run. Streams ciphertext into
     // a sibling temp file and renames over the placeholder on success, so a
-    // failure mid-write can never leave a partial .enc at output_path. Guard
+    // failure mid-write can never leave a partial .pqe at output_path. Guard
     // declaration order is the cleanup contract: dropping in reverse closes
     // fout, unlinks the temp, then unlinks the placeholder.
     //

@@ -20,7 +20,7 @@ proptest! {
 
         let data = TestData::random(size);
         let input_path = env.create_file("input.bin", &data.plaintext);
-        let encrypted_path = env.file_path("encrypted.enc");
+        let encrypted_path = env.file_path("encrypted.pqe");
         let decrypted_path = env.file_path("decrypted.bin");
 
         // Encrypt
@@ -71,7 +71,7 @@ proptest! {
         let size = chunks * chunk_size;
         let data = TestData::random(size);
         let input_path = env.create_file("input.bin", &data.plaintext);
-        let encrypted_path = env.file_path("encrypted.enc");
+        let encrypted_path = env.file_path("encrypted.pqe");
         let decrypted_path = env.file_path("decrypted.bin");
 
         // Encrypt
@@ -113,7 +113,7 @@ proptest! {
         let size = chunk_size + offset;
         let data = TestData::random(size);
         let input_path = env.create_file("input.bin", &data.plaintext);
-        let encrypted_path = env.file_path("encrypted.enc");
+        let encrypted_path = env.file_path("encrypted.pqe");
         let decrypted_path = env.file_path("decrypted.bin");
 
         // Encrypt
