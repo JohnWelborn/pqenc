@@ -1544,6 +1544,31 @@ mod format_tests {
         )
     }
 
+    /// Loads a real, valid private key from `priv_path`, flips one byte of
+    /// its embedded `H(ek)` (the FIPS 203 §7.3 hash-check field), and writes
+    /// it back out as a plain-text (unencrypted) PEM under `dir/filename`.
+    /// Composite layout is `[4-byte len][ML-KEM sk(3168)][X25519 sk(32)]`,
+    /// and within the ML-KEM secret key the stored hash sits at bytes
+    /// [3104, 3136) -- see `validate_private_key_only` in libcrux-ml-kem's
+    /// `ind_cca.rs`. Returns the corrupted key's path.
+    fn corrupt_private_key_hash(
+        dir: &std::path::Path,
+        priv_path: &str,
+        filename: &str,
+    ) -> std::path::PathBuf {
+        let mut composite_priv =
+            load_private_key(priv_path, Some(TEST_PASSPHRASE.to_string())).unwrap();
+        composite_priv.data[4 + 3104] ^= 0xFF;
+
+        let corrupted_path = dir.join(filename);
+        fs::write(
+            &corrupted_path,
+            pem_encode(&composite_priv.data, PEM_PRIV_BEGIN, PEM_PRIV_END),
+        )
+        .unwrap();
+        corrupted_path
+    }
+
     /// Returns the on-disk header length of an already-encrypted file, by
     /// running the same `parse_header` decrypt_file/verify_file use.
     fn read_header_len(path: &std::path::Path) -> usize {
@@ -1853,6 +1878,100 @@ mod format_tests {
             "unexpected error: {err:#}"
         );
         assert!(!restored_path.exists());
+    }
+
+    #[test]
+    fn test_encrypt_rejects_invalid_public_key() {
+        let dir = TempDir::new().unwrap();
+
+        // Same-length-but-invalid ML-KEM public key: passes every size
+        // check but fails the FIPS 203 §7.2 canonical-encoding check.
+        // All-0xFF bytes pack to the maximum 12-bit value (4095) for every
+        // coefficient, which is >= q (3329), so none of them are canonically
+        // reduced -- unlike the security review's own repeated-0x42 fixture,
+        // which (checked empirically) happens to already be canonical and
+        // so is unsuitable here.
+        let mlkem_pk = vec![0xFFu8; MLKEM1024_PUBLIC_KEY_SIZE];
+        let x25519_pk = [0x33u8; 32];
+        let mut composite_pub = Vec::new();
+        composite_pub.extend_from_slice(&(mlkem_pk.len() as u32).to_be_bytes());
+        composite_pub.extend_from_slice(&mlkem_pk);
+        composite_pub.extend_from_slice(&x25519_pk);
+
+        let bad_pub_path = dir.path().join("bad_pub.pem");
+        fs::write(
+            &bad_pub_path,
+            pem_encode(&composite_pub, PEM_PUB_BEGIN, PEM_PUB_END),
+        )
+        .unwrap();
+
+        let input_path = dir.path().join("pubkey_in.bin");
+        fs::write(&input_path, b"some content").unwrap();
+        let output_path = dir.path().join("pubkey_out.pqe");
+
+        let result = encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            bad_pub_path.to_str().unwrap(),
+        );
+        let err = result.expect_err("a non-canonical ML-KEM public key must be rejected");
+        assert!(
+            format!("{err:#}").contains("Invalid ML-KEM public key"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn test_decrypt_rejects_corrupted_private_key_hash() {
+        let dir = TempDir::new().unwrap();
+        let (pub_path, priv_path) = generate_test_keypair(dir.path());
+        let input_path = dir.path().join("priv_corrupt_in.bin");
+        fs::write(&input_path, b"some content").unwrap();
+        let output_path = dir.path().join("priv_corrupt.pqe");
+
+        encrypt_file(
+            input_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            &pub_path,
+        )
+        .unwrap();
+
+        let corrupted_priv_path =
+            corrupt_private_key_hash(dir.path(), &priv_path, "corrupted_priv.pem");
+
+        let restored_path = dir.path().join("priv_corrupt_out.bin");
+        let result = decrypt_file(
+            output_path.to_str().unwrap(),
+            Some(restored_path.to_str().unwrap()),
+            corrupted_priv_path.to_str().unwrap(),
+            None,
+        );
+        let err = result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
+        assert!(
+            format!("{err:#}").contains("Invalid ML-KEM private key"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!restored_path.exists());
+    }
+
+    #[test]
+    fn test_fingerprint_rejects_corrupted_private_key_hash() {
+        let dir = TempDir::new().unwrap();
+        let (_pub_path, priv_path) = generate_test_keypair(dir.path());
+
+        let corrupted_priv_path =
+            corrupt_private_key_hash(dir.path(), &priv_path, "fp_corrupted_priv.pem");
+
+        let result = show_fingerprint(
+            corrupted_priv_path.to_str().unwrap().to_string(),
+            None,
+        );
+        let err = result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
+        assert!(
+            format!("{err:#}").contains("Invalid ML-KEM private key"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

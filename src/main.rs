@@ -958,6 +958,36 @@ fn parse_private_composite_key(data: &[u8]) -> Result<(SensitiveData, SensitiveD
     Ok((mlkem_sk, x25519_sk))
 }
 
+/// Validates an ML-KEM-1024 public key per FIPS 203 §7.2 (the modulus/
+/// canonical-encoding check) before it is trusted for encapsulation. The
+/// underlying `encapsulate` call performs no such check itself -- libcrux
+/// leaves it to the caller.
+fn validate_mlkem_public_key(pk: &mlkem1024::MlKem1024PublicKey) -> Result<()> {
+    if !mlkem1024::validate_public_key(pk) {
+        bail!("Invalid ML-KEM public key (failed FIPS 203 validation)");
+    }
+    Ok(())
+}
+
+/// Validates an ML-KEM-1024 private key per FIPS 203 §7.3 (the hash check:
+/// the embedded `H(ek)` must match the embedded encapsulation key) before it
+/// is trusted for decapsulation. The underlying `decapsulate` call performs
+/// no such check itself -- libcrux leaves it to the caller.
+///
+/// `ciphertext` is part of the library's signature but is not actually used
+/// by this check (it forwards to a hash comparison over `private_key` alone)
+/// -- callers with no real ciphertext on hand (fingerprinting) may pass an
+/// all-zero dummy.
+fn validate_mlkem_private_key(
+    sk: &mlkem1024::MlKem1024PrivateKey,
+    ct: &mlkem1024::MlKem1024Ciphertext,
+) -> Result<()> {
+    if !mlkem1024::validate_private_key(sk, ct) {
+        bail!("Invalid ML-KEM private key (failed FIPS 203 hash check)");
+    }
+    Ok(())
+}
+
 /// SHA256 of the composite public key. Hashing the whole blob (both the
 /// ML-KEM and X25519 halves together) means drift in either sub-key changes
 /// the fingerprint, rather than just the half that drifted.
@@ -1117,11 +1147,28 @@ fn show_fingerprint(key_path: String, passphrase: Option<String>) -> Result<()> 
         }
         let composite_pub = pem_decode(&pem_text, PEM_PUB_BEGIN, PEM_PUB_END)?;
         // Validate structure so a corrupt or foreign file fails clearly.
-        parse_public_composite_key(&composite_pub)?;
+        let (mlkem_pk, _x25519_pk) = parse_public_composite_key(&composite_pub)?;
+        let mlkem_pk_array: [u8; MLKEM1024_PUBLIC_KEY_SIZE] = mlkem_pk
+            .try_into()
+            .expect("length checked by parse_public_composite_key");
+        validate_mlkem_public_key(&mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array))?;
         composite_pub
     } else if pem_text.contains(PEM_PRIV_BEGIN) || pem_text.contains(PEM_PRIV_ENC_BEGIN) {
         let composite_priv = load_private_key(&key_path, passphrase)?;
         let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
+        let mlkem_sk_array: [u8; MLKEM1024_PRIVATE_KEY_SIZE] = mlkem_sk
+            .data
+            .as_slice()
+            .try_into()
+            .expect("length checked by parse_private_composite_key");
+        // No real ciphertext exists at fingerprint time; validate_private_key
+        // ignores its ciphertext argument (see validate_mlkem_private_key's
+        // doc comment), so an all-zero dummy is fine here.
+        let dummy_ciphertext = mlkem1024::MlKem1024Ciphertext::from([0u8; 1568]);
+        validate_mlkem_private_key(
+            &mlkem1024::MlKem1024PrivateKey::from(mlkem_sk_array),
+            &dummy_ciphertext,
+        )?;
         extract_public_from_private(&mlkem_sk.data, &x25519_sk.data)?
     } else {
         bail!("Not a valid pqenc public or private key file: {}", key_path);
@@ -2310,6 +2357,7 @@ fn encrypt_file_with_segment_size(
         .try_into()
         .context("Invalid ML-KEM public key size")?;
     let public_key = mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array);
+    validate_mlkem_public_key(&public_key)?;
 
     // Encapsulate
     let (ciphertext, mut shared_secret) = mlkem1024::encapsulate(&public_key, encaps_randomness);
@@ -3010,6 +3058,11 @@ fn decrypt_file_with_segment_size(
         .try_into()
         .context("Invalid ciphertext size")?;
     let ciphertext = mlkem1024::MlKem1024Ciphertext::from(ciphertext_array);
+
+    if let Err(e) = validate_mlkem_private_key(&private_key, &ciphertext) {
+        private_key[0..MLKEM1024_PRIVATE_KEY_SIZE].zeroize();
+        return Err(e);
+    }
 
     // Decapsulate (always succeeds per FIPS 203)
     let mut shared_secret = mlkem1024::decapsulate(&private_key, &ciphertext);
