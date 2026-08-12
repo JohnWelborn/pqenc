@@ -802,10 +802,42 @@ mod metadata_tests {
     }
 
     #[test]
-    fn test_directory_basename_rejects_paths_without_a_usable_name() {
-        for bad in [".", "..", "/", ""] {
-            assert!(directory_basename(bad).is_err(), "should reject {:?}", bad);
-        }
+    fn test_directory_basename_resolves_dot_and_dotdot_via_canonicalize() {
+        // Path::file_name() returns None for these, but they name a real,
+        // nameable directory once canonicalized -- unlike the test runner's
+        // cwd (whose name isn't worth pinning here), a TempDir gives a
+        // known, controlled parent/child pair to assert against.
+        assert!(directory_basename(".").is_ok());
+        assert!(directory_basename("..").is_ok());
+
+        let dir = TempDir::new().unwrap();
+        let parent_name = dir.path().file_name().unwrap().to_str().unwrap();
+        let child = dir.path().join("child");
+        fs::create_dir(&child).unwrap();
+
+        // "<child>/.." also has no raw file_name() (ends in ".."), and
+        // canonicalizes to the same parent directory.
+        let trailing_dotdot = child.join("..");
+        assert_eq!(
+            directory_basename(trailing_dotdot.to_str().unwrap()).unwrap(),
+            parent_name
+        );
+    }
+
+    #[test]
+    fn test_directory_basename_rejects_root_and_empty_with_accurate_message() {
+        let root_err = directory_basename("/").unwrap_err().to_string();
+        assert!(
+            root_err.contains("filesystem root"),
+            "unexpected message: {root_err}"
+        );
+        assert!(!root_err.contains("pass an explicit --output"));
+
+        let empty_err = directory_basename("").unwrap_err().to_string();
+        assert!(
+            !empty_err.contains("pass an explicit --output"),
+            "unexpected message: {empty_err}"
+        );
     }
 
     #[test]

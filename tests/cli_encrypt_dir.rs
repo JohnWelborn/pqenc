@@ -27,6 +27,23 @@ fn temp_artifacts(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Recursively searches `dir` for a file named `name` and returns its
+/// content. Used to check roundtrip content without assuming what basename
+/// the archiver picked for the directory's top-level tar entry.
+fn find_file_content(dir: &Path, name: &str) -> Option<Vec<u8>> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_content(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|f| f == name) {
+            return Some(fs::read(&path).unwrap());
+        }
+    }
+    None
+}
+
 #[test]
 #[cfg(unix)]
 fn test_encrypt_directory_via_tar_command() {
@@ -505,5 +522,280 @@ fn test_encrypt_directory_native_archiving_failure_leaves_no_output() {
     assert!(
         temp_artifacts(&env.file_path(".")).is_empty(),
         "no leftover .tmp. sibling should be left behind after a failed archive"
+    );
+}
+
+// Regression tests for: `pqenc encrypt .` / `pqenc encrypt ..` always fail,
+// even with an explicit `--output`, because directory encryption
+// unconditionally derives a basename from the input path (to name the tar's
+// internal top-level entry / embedded metadata filename) and bails when
+// `Path::file_name()` can't produce one -- which is true for ".", "..", "/",
+// and any path ending in "..", regardless of whether `--output` already
+// supplies everything needed to know where to write the ciphertext.
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dot_with_explicit_output_succeeds() {
+    if !tar_available() {
+        eprintln!("Skipping test: tar not available");
+        return;
+    }
+
+    let env = TempTestEnv::new();
+    let work_dir = env.file_path("work");
+    fs::create_dir_all(&work_dir).unwrap();
+    let test_content = b"backing up the current directory";
+    fs::write(work_dir.join("file.txt"), test_content).unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let encrypted_path = env.file_path("dot.pqe");
+
+    // cd into `work_dir` and encrypt "." -- the common "back up the current
+    // directory" case from the bug report.
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            ".",
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&work_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+    assert!(
+        enc_output.status.success(),
+        "pqenc encrypt . --output should succeed: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+
+    let decrypted_path = env.file_path("dot.tar.gz");
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE,
+    )
+    .expect("pqenc decrypt failed");
+
+    let extract_dir = env.file_path("extracted_dot");
+    fs::create_dir(&extract_dir).unwrap();
+    let untar_status = Command::new("tar")
+        .args(["xzf", decrypted_path.to_str().unwrap()])
+        .current_dir(&extract_dir)
+        .status()
+        .expect("Failed to run tar extract");
+    assert!(untar_status.success(), "tar extract failed");
+
+    assert_eq!(
+        find_file_content(&extract_dir, "file.txt").as_deref(),
+        Some(test_content.as_slice()),
+        "decrypted archive should contain the original file's content"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dotdot_with_explicit_output_succeeds() {
+    if !tar_available() {
+        eprintln!("Skipping test: tar not available");
+        return;
+    }
+
+    let env = TempTestEnv::new();
+    let parent_dir = env.file_path("parent");
+    let child_dir = parent_dir.join("child");
+    fs::create_dir_all(&child_dir).unwrap();
+    let test_content = b"backing up the parent directory";
+    fs::write(parent_dir.join("marker.txt"), test_content).unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let encrypted_path = env.file_path("dotdot.pqe");
+
+    // cd into `child_dir` and encrypt ".." -- resolves to `parent_dir`.
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            "..",
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&child_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+    assert!(
+        enc_output.status.success(),
+        "pqenc encrypt .. --output should succeed: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+
+    let decrypted_path = env.file_path("dotdot.tar.gz");
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE,
+    )
+    .expect("pqenc decrypt failed");
+
+    let extract_dir = env.file_path("extracted_dotdot");
+    fs::create_dir(&extract_dir).unwrap();
+    let untar_status = Command::new("tar")
+        .args(["xzf", decrypted_path.to_str().unwrap()])
+        .current_dir(&extract_dir)
+        .status()
+        .expect("Failed to run tar extract");
+    assert!(untar_status.success(), "tar extract failed");
+
+    assert_eq!(
+        find_file_content(&extract_dir, "marker.txt").as_deref(),
+        Some(test_content.as_slice()),
+        "decrypted archive should contain the parent directory's content"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_path_ending_in_dotdot_with_explicit_output_succeeds() {
+    if !tar_available() {
+        eprintln!("Skipping test: tar not available");
+        return;
+    }
+
+    // Same underlying bug as the literal ".." case, but reached through a
+    // longer path that merely *ends* in "..", with no cwd change involved --
+    // `Path::file_name()` returns `None` for this shape too.
+    let env = TempTestEnv::new();
+    let parent_dir = env.file_path("parent2");
+    let child_dir = parent_dir.join("child");
+    fs::create_dir_all(&child_dir).unwrap();
+    let test_content = b"trailing dotdot path";
+    fs::write(parent_dir.join("marker.txt"), test_content).unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let encrypted_path = env.file_path("trailing_dotdot.pqe");
+    let input_arg = child_dir.join("..");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_arg.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run pqenc encrypt");
+    assert!(
+        enc_output.status.success(),
+        "pqenc encrypt <path ending in ..> --output should succeed: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+
+    let decrypted_path = env.file_path("trailing_dotdot.tar.gz");
+    env.decrypt_file_with_passphrase(
+        encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE,
+    )
+    .expect("pqenc decrypt failed");
+
+    let extract_dir = env.file_path("extracted_trailing_dotdot");
+    fs::create_dir(&extract_dir).unwrap();
+    let untar_status = Command::new("tar")
+        .args(["xzf", decrypted_path.to_str().unwrap()])
+        .current_dir(&extract_dir)
+        .status()
+        .expect("Failed to run tar extract");
+    assert!(untar_status.success(), "tar extract failed");
+
+    assert_eq!(
+        find_file_content(&extract_dir, "marker.txt").as_deref(),
+        Some(test_content.as_slice()),
+        "decrypted archive should contain the original directory's content"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dot_error_message_is_not_misleading_about_output() {
+    // Today this fails even with --output, yet the error text says to pass
+    // one -- pin down that once the underlying bug is fixed, encrypt . with
+    // an explicit --output no longer produces this specific misleading
+    // message. (It may still fail for some *other* reason in principle, but
+    // must not fail with "pass an explicit --output" while --output is
+    // already present.)
+    let env = TempTestEnv::new();
+    let work_dir = env.file_path("work_msg");
+    fs::create_dir_all(&work_dir).unwrap();
+    fs::write(work_dir.join("file.txt"), b"content").unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let encrypted_path = env.file_path("dot_msg.pqe");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            ".",
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&work_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    let stderr = String::from_utf8_lossy(&enc_output.stderr);
+    assert!(
+        !stderr.contains("pass an explicit --output"),
+        "encrypt . --output <path> should not fail by telling the user to pass --output \
+         when they already did; got: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_root_slash_fails_with_accurate_message() {
+    // Unlike "." / ".." / trailing-".." paths, "/" has no basename at any
+    // resolution depth, so directory encryption still rejects it -- but the
+    // message must no longer suggest --output as a fix, since --output was
+    // never the problem. This is safe to run for real: the rejection happens
+    // at the naming step (before the archiving pipe/thread is spawned), so
+    // it never attempts to walk the filesystem.
+    let env = TempTestEnv::new();
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let encrypted_path = env.file_path("root.pqe");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            "/",
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    assert!(
+        !enc_output.status.success(),
+        "encrypt / should still fail (the filesystem root has no basename)"
+    );
+    let stderr = String::from_utf8_lossy(&enc_output.stderr);
+    assert!(
+        stderr.contains("filesystem root"),
+        "expected an accurate 'filesystem root' message; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("pass an explicit --output"),
+        "encrypt / should not blame --output for a failure --output can't fix; got: {stderr}"
+    );
+    assert!(
+        !encrypted_path.exists(),
+        "no output file should be left behind after a rejected directory name"
     );
 }

@@ -1777,17 +1777,30 @@ fn sanitize_embedded_filename(raw: &str) -> Option<String> {
 /// basename themselves, so the tar's own internal name always matches the
 /// embedded name decrypt later derives its default output from.
 ///
-/// Fails closed (rather than falling back to some placeholder) for a path
-/// with no usable final component (`.`, `..`, `/`, empty) -- unlike a cosmetic
-/// error-message string, this value drives real naming decisions.
+/// `Path::file_name()` returns `None` for `.`, `..`, `/`, and any path
+/// ending in `..`, even though the first three of those name a perfectly
+/// real, nameable directory -- canonicalizing resolves them (`.` to the
+/// cwd's own absolute path, `..` to its parent's) before taking the
+/// basename. Only the filesystem root (no basename at any depth) and a
+/// nonexistent/empty path (canonicalize itself fails) are still errors --
+/// unlike a cosmetic error-message string, this value drives real naming
+/// decisions, so those two cases fail closed rather than fall back to some
+/// placeholder.
 fn directory_basename(dir_path: &str) -> Result<String> {
-    std::path::Path::new(dir_path)
+    let path = std::path::Path::new(dir_path);
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        return Ok(name.to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Cannot determine a name for directory '{dir_path}'"))?;
+    canonical
         .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Cannot determine a name for directory '{}': pass an explicit --output",
+                "Cannot determine a name for directory '{}': the filesystem root has no name to use",
                 dir_path
             )
         })
