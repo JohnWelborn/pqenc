@@ -1807,12 +1807,27 @@ fn directory_basename(dir_path: &str) -> Result<String> {
 }
 
 /// Resolves the encrypt output path when `-o` was omitted: `<input>.pqe` for
-/// a file, or `<input>.tar.gz.pqe` for a directory (trailing path separators
-/// trimmed first, so `mydir/` behaves the same as `mydir`) -- in both cases
-/// keeping whatever path prefix the user typed, exactly like the file case
+/// a file, or `<input>.tar.gz.pqe` for a directory -- in both cases keeping
+/// whatever path prefix the user typed (trailing separators trimmed first,
+/// so `mydir/` behaves the same as `mydir`), exactly like the file case
 /// already does, rather than collapsing to a bare basename in the current
-/// directory. Bails if input is stdin -- there's no filename to derive a
-/// default from.
+/// directory.
+///
+/// Exception: for `.` / `..` / any directory path ending in `..`,
+/// `Path::file_name()` can't produce a basename to suffix in place --
+/// naively appending the suffix to the typed string would land the default
+/// output *inside* the directory being archived (e.g. `.` + `.tar.gz.pqe`
+/// is `..tar.gz.pqe`, inside `.`), so the backup would capture its own
+/// output file mid-write. For that case only, this canonicalizes the
+/// directory first and suffixes its resolved absolute path instead --
+/// guaranteed to name a sibling, never a descendant, since canonicalize
+/// resolves `.`/`..` to the real directory before the suffix is applied.
+/// This is the one case where the returned path deliberately does not
+/// match the user's typed prefix. Also rejects the filesystem root here
+/// (no parent to place a sibling output in), matching `directory_basename`'s
+/// own root rejection.
+///
+/// Bails if input is stdin -- there's no filename to derive a default from.
 fn resolve_encrypt_output(input_path: &str, output: Option<String>) -> Result<String> {
     match output {
         Some(o) => Ok(o),
@@ -1820,13 +1835,132 @@ fn resolve_encrypt_output(input_path: &str, output: Option<String>) -> Result<St
             if is_stdin_path(input_path) {
                 bail!("--output is required when reading from stdin");
             }
-            if std::path::Path::new(input_path).is_dir() {
-                let trimmed = input_path.trim_end_matches(['/', '\\']);
-                return Ok(format!("{trimmed}.tar.gz.pqe"));
+            let dir_path = std::path::Path::new(input_path);
+            if dir_path.is_dir() {
+                if dir_path.file_name().is_some() {
+                    let trimmed = input_path.trim_end_matches(['/', '\\']);
+                    return Ok(format!("{trimmed}.tar.gz.pqe"));
+                }
+                let canonical = dir_path.canonicalize().with_context(|| {
+                    format!("Cannot determine a default output path for directory '{input_path}'")
+                })?;
+                if canonical.parent().is_none() {
+                    bail!(
+                        "Cannot determine a default output path for directory '{}': \
+                         the filesystem root has no parent to place a sibling output \
+                         in; pass an explicit --output",
+                        input_path
+                    );
+                }
+                let canonical_str = canonical.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Cannot determine a default output path for directory '{}': \
+                         resolved path is not valid UTF-8; pass an explicit --output",
+                        input_path
+                    )
+                })?;
+                return Ok(format!("{canonical_str}.tar.gz.pqe"));
             }
             Ok(format!("{}.pqe", input_path))
         }
     }
+}
+
+/// Best-effort absolute, symlink-resolved location `output_path` would
+/// occupy once written, without requiring it to exist yet -- only its
+/// parent directory typically does, since pqenc never creates output's
+/// parent directories itself (`create_new_exclusive`'s `O_CREAT` needs an
+/// existing parent). Tries `output_path` itself first (handles a stale file,
+/// or a symlink, already sitting there); if that doesn't exist, falls back
+/// to canonicalizing just its parent and rejoining the final path
+/// component -- left unresolved, since by construction it doesn't exist and
+/// so can't itself be a symlink -- onto it. This resolves a symlinked
+/// parent directory and a `.`/`..`-containing prefix (`canonicalize`,
+/// unlike `std::path::absolute`, does resolve `..` against the real
+/// filesystem) without needing to guess at path components that don't
+/// exist yet.
+///
+/// Returns `None` -- "couldn't determine, skip the check" -- if neither
+/// `output_path` nor its parent canonicalizes (the parent doesn't exist
+/// either: that run is going to fail later at the claim step regardless,
+/// with nothing ever written, so there's nothing left for a containment
+/// check to protect against), or if `output_path` has no file name to
+/// reattach.
+fn resolve_prospective_output_path(output_path: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(output_path);
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name()?;
+    parent.canonicalize().ok().map(|p| p.join(name))
+}
+
+/// Rejects an encrypt `--output` path that resolves inside `input_path`,
+/// the directory about to be archived. Must run, for a directory input,
+/// before the archiving thread is spawned: `tar::Builder::append_dir_all`
+/// walks `input_path` live, on a background thread, concurrently with this
+/// process creating `output_path`'s reservation placeholder and streaming
+/// its temp file -- if `output_path` sits inside `input_path`, the archiver
+/// can capture either of those (the `RESERVATION_MARKER` placeholder, or a
+/// torn slice of the still-growing ciphertext, depending on how the two
+/// threads interleave) into the very backup meant to protect the
+/// directory's contents, corrupting it silently.
+///
+/// Both `resolve_encrypt_output`'s own directory-branch default (guarded
+/// separately, by canonicalizing before suffixing) and an explicit
+/// `--output` are checked here, in one place: an explicit `--output` that
+/// happens to land inside the input directory (e.g.
+/// `encrypt mydir -o mydir/out.pqe`) bypasses `resolve_encrypt_output`
+/// entirely (it's a pure passthrough for `Some(output)`), so only a check
+/// downstream of both paths closes the hole for both.
+///
+/// Resolves both sides to their absolute, symlink-resolved form before
+/// comparing (see `resolve_prospective_output_path`), so a relative
+/// `--output`, one spelled through `.`/`..`, or a symlinked parent
+/// directory can't disguise containment. `input_path` is expected to
+/// already be confirmed to exist and be a directory by the caller.
+///
+/// Skips the check entirely (returns `Ok(())`) when `input_path`
+/// canonicalizes to the filesystem root: root trivially "contains" every
+/// path on the same filesystem, so the check would reject every
+/// `--output` uselessly; `directory_basename`'s own, more specific
+/// rejection ("the filesystem root has no name to use") fires a little
+/// further down this same call for that case instead. Also fails open if
+/// canonicalizing `input_path` itself fails (shouldn't happen -- it was
+/// just confirmed to exist and be a directory) or if
+/// `resolve_prospective_output_path` can't resolve `output_path` -- a real
+/// problem with either path surfaces on its own, later, from a more
+/// specific error (`claim_output_and_temp`'s `O_CREAT`, or
+/// `directory_basename`). This is a footgun guard against accidental
+/// self-inclusion, not a hardened defense against an adversary who can
+/// modify the filesystem between this check and the later write -- the
+/// same pragmatic, fail-safe posture `is_stale_reservation_placeholder` and
+/// `claim_output_and_temp` already take elsewhere in this file.
+fn reject_output_inside_input_dir(input_path: &str, output_path: &str) -> Result<()> {
+    let Ok(canonical_input) = std::path::Path::new(input_path).canonicalize() else {
+        return Ok(());
+    };
+    if canonical_input.parent().is_none() {
+        return Ok(());
+    }
+    let Some(canonical_output) = resolve_prospective_output_path(output_path) else {
+        return Ok(());
+    };
+    if canonical_output.starts_with(&canonical_input) {
+        bail!(
+            "Output path '{}' is inside the directory being encrypted ('{}'), \
+             so the archive would capture its own output file; choose an \
+             --output path outside '{}'",
+            output_path,
+            input_path,
+            input_path
+        );
+    }
+    Ok(())
 }
 
 /// Resolves the decrypt output path when `-o` was omitted, in precedence
@@ -2156,6 +2290,10 @@ fn encrypt_file_with_segment_size(
     }
     validate_path(output_path, false, false, "Output file")?;
     validate_path(public_key_path, true, false, "Public key")?;
+
+    if is_dir {
+        reject_output_inside_input_dir(input_path, output_path)?;
+    }
 
     // Load PEM public key
     let pem_text = fs::read_to_string(public_key_path).context("Failed to read public key")?;

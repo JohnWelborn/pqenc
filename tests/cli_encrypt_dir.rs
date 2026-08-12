@@ -2,7 +2,7 @@ mod helpers;
 use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn pqenc_binary() -> String {
@@ -798,4 +798,258 @@ fn test_encrypt_directory_root_slash_fails_with_accurate_message() {
         !encrypted_path.exists(),
         "no output file should be left behind after a rejected directory name"
     );
+}
+
+// Regression tests for: `pqenc encrypt .` (and other directory encryptions)
+// could archive their own output file. The default output for "." used to
+// be computed as a name *inside* the directory being archived, and even
+// with an explicit --output there was no check that the output landed
+// outside the input directory -- so the background tar thread could
+// capture the output's reservation placeholder, or a partial slice of its
+// growing ciphertext, into the very backup meant to protect the directory.
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dot_default_output_does_not_self_include() {
+    if !tar_available() {
+        eprintln!("Skipping test: tar not available");
+        return;
+    }
+
+    let env = TempTestEnv::new();
+    let work_dir = env.file_path("work");
+    fs::create_dir_all(&work_dir).unwrap();
+    let test_content = b"backing up the current directory, no --output";
+    fs::write(work_dir.join("file.txt"), test_content).unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            ".",
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&work_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+    assert!(
+        enc_output.status.success(),
+        "pqenc encrypt . (no --output) should succeed: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+
+    // Nothing new should have been written inside the directory being
+    // archived -- the default output must land beside it.
+    let entries: Vec<String> = fs::read_dir(&work_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["file.txt".to_string()],
+        "the default output must not be written inside the directory being archived"
+    );
+
+    let expected_encrypted_path = env.file_path("work.tar.gz.pqe");
+    assert!(
+        expected_encrypted_path.exists(),
+        "expected default output at {:?}",
+        expected_encrypted_path
+    );
+
+    let decrypted_path = env.file_path("work_dot.tar.gz");
+    env.decrypt_file_with_passphrase(
+        expected_encrypted_path.to_str().unwrap(),
+        decrypted_path.to_str().unwrap(),
+        TEST_PASSPHRASE,
+    )
+    .expect("pqenc decrypt failed");
+
+    let extract_dir = env.file_path("extracted_dot_default");
+    fs::create_dir(&extract_dir).unwrap();
+    let untar_status = Command::new("tar")
+        .args(["xzf", decrypted_path.to_str().unwrap()])
+        .current_dir(&extract_dir)
+        .status()
+        .expect("Failed to run tar extract");
+    assert!(untar_status.success(), "tar extract failed");
+
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut extracted_files = Vec::new();
+    walk(&extract_dir, &mut extracted_files);
+    assert_eq!(
+        extracted_files.len(),
+        1,
+        "archive should contain exactly the one original file, got {:?}",
+        extracted_files
+    );
+    assert_eq!(
+        find_file_content(&extract_dir, "file.txt").as_deref(),
+        Some(test_content.as_slice())
+    );
+    for f in &extracted_files {
+        assert_ne!(
+            fs::read(f).unwrap(),
+            b"PQENC-RESERVED-PLACEHOLDER\n",
+            "archive must not contain the output's reservation placeholder: {:?}",
+            f
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_explicit_output_inside_directory_is_rejected() {
+    let env = TempTestEnv::new();
+    let dir_path = env.file_path("mydir");
+    fs::create_dir_all(&dir_path).unwrap();
+    fs::write(dir_path.join("file.txt"), b"content").unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let inside_output = dir_path.join("out.pqe");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            dir_path.to_str().unwrap(),
+            "--output",
+            inside_output.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    assert!(
+        !enc_output.status.success(),
+        "encrypt with --output inside the input directory must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&enc_output.stderr);
+    assert!(
+        stderr.contains("inside the directory being encrypted"),
+        "unexpected message: {stderr}"
+    );
+    assert!(
+        !inside_output.exists(),
+        "no output file should be left behind after rejection"
+    );
+    assert!(
+        temp_artifacts(&dir_path).is_empty(),
+        "no leftover temp artifacts should be left behind after rejection"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dot_explicit_relative_output_inside_cwd_is_rejected() {
+    let env = TempTestEnv::new();
+    let work_dir = env.file_path("work_rel_inside");
+    fs::create_dir_all(&work_dir).unwrap();
+    fs::write(work_dir.join("file.txt"), b"content").unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            ".",
+            "--output",
+            "out.pqe",
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&work_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    assert!(
+        !enc_output.status.success(),
+        "encrypt . -o out.pqe (implicitly inside cwd) must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&enc_output.stderr);
+    assert!(
+        stderr.contains("inside the directory being encrypted"),
+        "unexpected message: {stderr}"
+    );
+    assert!(!work_dir.join("out.pqe").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_dot_explicit_output_as_true_sibling_still_succeeds() {
+    let env = TempTestEnv::new();
+    let work_dir = env.file_path("work_sibling");
+    fs::create_dir_all(&work_dir).unwrap();
+    fs::write(work_dir.join("file.txt"), b"content").unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            ".",
+            "--output",
+            "../sibling.pqe",
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .current_dir(&work_dir)
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    assert!(
+        enc_output.status.success(),
+        "a genuine sibling --output must not be rejected: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+    assert!(env.file_path("sibling.pqe").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_encrypt_directory_explicit_output_through_symlinked_parent_is_rejected() {
+    let env = TempTestEnv::new();
+    let dir_path = env.file_path("mydir");
+    fs::create_dir_all(&dir_path).unwrap();
+    fs::write(dir_path.join("file.txt"), b"content").unwrap();
+
+    let link_path = env.file_path("link_to_mydir");
+    std::os::unix::fs::symlink(&dir_path, &link_path).unwrap();
+
+    let (public_key_path, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let output_through_link = link_path.join("out.pqe");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            dir_path.to_str().unwrap(),
+            "--output",
+            output_through_link.to_str().unwrap(),
+            "--public-key",
+            public_key_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run pqenc encrypt");
+
+    assert!(
+        !enc_output.status.success(),
+        "an --output reached through a symlink into the input directory must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&enc_output.stderr);
+    assert!(
+        stderr.contains("inside the directory being encrypted"),
+        "unexpected message: {stderr}"
+    );
+    assert!(!output_through_link.exists());
 }

@@ -794,6 +794,49 @@ mod metadata_tests {
     }
 
     #[test]
+    fn test_resolve_encrypt_output_dot_is_ok_and_not_self_contained() {
+        // The test binary's ambient cwd isn't stable/meaningful enough to
+        // pin an exact string against (same reasoning as
+        // test_directory_basename_resolves_dot_and_dotdot_via_canonicalize
+        // below), but the default output for "." must land beside cwd, not
+        // inside it -- that's exactly the bug this guards against.
+        let resolved = resolve_encrypt_output(".", None).unwrap();
+        let resolved_path = std::path::Path::new(&resolved);
+        assert!(resolved_path.is_absolute());
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(resolved_path.parent(), cwd.parent());
+    }
+
+    #[test]
+    fn test_resolve_encrypt_output_trailing_dotdot_resolves_to_sibling_of_parent() {
+        let dir = TempDir::new().unwrap();
+        let child = dir.path().join("child");
+        fs::create_dir(&child).unwrap();
+
+        // "<child>/.." canonicalizes to `dir`; the default output must be a
+        // sibling of `dir`, never a path inside `child` (which is what
+        // naively suffixing the typed string used to produce).
+        let trailing_dotdot = child.join("..");
+        let resolved = resolve_encrypt_output(trailing_dotdot.to_str().unwrap(), None).unwrap();
+        let expected = format!(
+            "{}.tar.gz.pqe",
+            dir.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(resolved, expected);
+        assert!(!resolved.starts_with(child.to_str().unwrap()));
+    }
+
+    #[test]
+    fn test_resolve_encrypt_output_root_directory_fails_with_accurate_message() {
+        let err = resolve_encrypt_output("/", None).unwrap_err().to_string();
+        assert!(
+            err.contains("filesystem root"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("--output"), "should suggest --output: {err}");
+    }
+
+    #[test]
     fn test_directory_basename_extracts_final_component() {
         assert_eq!(directory_basename("mydir").unwrap(), "mydir");
         assert_eq!(directory_basename("mydir/").unwrap(), "mydir");
