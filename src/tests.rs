@@ -887,7 +887,15 @@ mod metadata_tests {
     fn test_resolve_decrypt_output_prefers_sanitized_embedded_filename() {
         let resolved =
             resolve_decrypt_output("/tmp/archive/backup.pqe", Some("report.pdf")).unwrap();
-        assert_eq!(resolved, "/tmp/archive/report.pdf");
+        // Built via Path::join, not a hardcoded "/"-joined literal: the
+        // parent directory retains its original separators (from the input
+        // string) while the joined filename uses the platform's native
+        // separator, so the two can differ within a single path on Windows.
+        let expected = std::path::Path::new("/tmp/archive")
+            .join("report.pdf")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolved, expected);
     }
 
     #[test]
@@ -2077,8 +2085,11 @@ mod format_tests {
             "expected output restored via embedded PQE3 filename at {:?}",
             restored_path
         );
-        assert_eq!(fs::read(&restored_path).unwrap(), b"legacy pqe3 content");
 
+        // Checked before the content read below: on Linux, reading a file
+        // whose atime is more than a day older than its mtime (relatime
+        // default) bumps atime to now, which would make this assertion
+        // observe the read itself rather than the restored value.
         let restored_meta = fs::metadata(&restored_path).unwrap();
         assert_eq!(
             filetime::FileTime::from_last_modification_time(&restored_meta),
@@ -2088,6 +2099,8 @@ mod format_tests {
             filetime::FileTime::from_last_access_time(&restored_meta),
             filetime::FileTime::from_unix_time(1_700_000_100, 0)
         );
+
+        assert_eq!(fs::read(&restored_path).unwrap(), b"legacy pqe3 content");
     }
 
     #[test]
