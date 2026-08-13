@@ -1815,9 +1815,17 @@ fn decode_metadata_plaintext(plaintext: &[u8]) -> Result<DecodedMetadata> {
 /// string as the "original filename". AEAD authentication proves the
 /// metadata wasn't tampered with in transit, NOT that the sender was
 /// honest about the name. Whatever this returns, if `Some`, is safe to
-/// `Path::join` onto a trusted target directory and can only ever resolve
-/// to a direct child of that directory -- never elsewhere. Callers must
-/// never use the raw, unsanitized string for anything path-related.
+/// `Path::join` onto a trusted target directory: joining is guaranteed to
+/// land at a direct child of that directory and nowhere else, on every
+/// platform this crate targets -- specifically including Windows, where
+/// `PathBuf::join`/`push` do NOT behave like plain string concatenation
+/// (per the stdlib docs: "if `path` has a prefix but no root, it replaces
+/// `self`" -- a drive-relative name like "C:evil.txt" would otherwise
+/// silently discard the trusted parent directory entirely). Callers must
+/// never use the raw, unsanitized string for anything path-related, and
+/// should still revalidate the joined result before creating anything at
+/// it (see `resolve_decrypt_output`) rather than trusting this function
+/// alone.
 fn sanitize_embedded_filename(raw: &str) -> Option<String> {
     if raw.is_empty() || raw == "." || raw == ".." {
         return None;
@@ -1832,7 +1840,79 @@ fn sanitize_embedded_filename(raw: &str) -> Option<String> {
     if raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
         return None;
     }
+    // Defense in depth, via platform-native parsing: whatever this OS's own
+    // `Path` parser makes of `raw` must be exactly one ordinary
+    // (`Component::Normal`) component that round-trips back to `raw`
+    // byte-for-byte. This independently re-derives the "."/".." rejections
+    // above (they parse as `CurDir`/`ParentDir`, not `Normal`) and is what
+    // structurally catches a Windows path *prefix* -- e.g. "C:evil.txt"
+    // parses as `[Prefix(Disk('C')), Normal("evil.txt")]`, two components,
+    // not one. It does NOT, on its own, catch a `\0` byte (Path has no
+    // opinion on NUL) or a bare backslash on a Unix build (not a separator
+    // there) -- those stay covered by the explicit checks above -- nor does
+    // it catch anything Windows treats specially only via `CreateFile`
+    // rather than path *syntax* (reserved device names, trailing dot/space,
+    // NTFS Alternate Data Streams): see `filename_unsafe_on_windows` below.
+    let mut components = std::path::Path::new(raw).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) if name == raw => {}
+        _ => return None,
+    }
+    if filename_unsafe_on_windows(raw) {
+        return None;
+    }
     Some(raw.to_string())
+}
+
+/// Windows-only additional rejections for `sanitize_embedded_filename`,
+/// beyond what platform-native `Component` parsing already catches (see its
+/// caller's comment). Rejects:
+///   - any of Windows' reserved filename characters beyond `/` and `\`
+///     (already handled above): `< > : " | ? *`, plus control characters
+///     1-31 -- per Microsoft's documented filename rules. The colon check
+///     alone subsumes both drive-prefix syntax (e.g. "C:evil.txt", which
+///     the `Component` check above also independently catches) and NTFS
+///     Alternate Data Stream syntax (e.g. "evil.txt:hidden.exe", which it
+///     does NOT -- an ADS colon never introduces a new `Component`);
+///   - a reserved MS-DOS device basename (CON, PRN, AUX, NUL, COM1-9,
+///     LPT1-9, plus the ISO/IEC-8859-1 superscript-digit COM/LPT variants
+///     Microsoft's docs list as equally reserved), matched
+///     case-insensitively against the portion of `raw` before its first
+///     '.' -- Microsoft's docs give "NUL.tar.gz" as equivalent to "NUL";
+///   - a trailing '.' or ' ', which the Win32 path layer silently strips
+///     from the final path component when the file is actually created, so
+///     the name that lands on disk could differ from `raw` in a way
+///     nothing else here would catch.
+/// `Component`-based parsing alone cannot catch any of these: Windows
+/// enforces them at `CreateFile` time, not as path *syntax*, so
+/// `Path::new("CON").components()` is an ordinary, structurally
+/// indistinguishable `[Normal("CON")]`. A no-op (`false`) on every other
+/// target.
+#[cfg(windows)]
+fn filename_unsafe_on_windows(raw: &str) -> bool {
+    const RESERVED_NAMES: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "COM\u{b9}", "COM\u{b2}", "COM\u{b3}", // COM¹ COM² COM³
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "LPT\u{b9}", "LPT\u{b2}", "LPT\u{b3}", // LPT¹ LPT² LPT³
+    ];
+
+    let has_reserved_char = raw.chars().any(|c| {
+        matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || matches!(c as u32, 1..=31)
+    });
+    if has_reserved_char || raw.ends_with('.') || raw.ends_with(' ') {
+        return true;
+    }
+    let stem = raw.split('.').next().unwrap_or(raw);
+    RESERVED_NAMES
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+#[cfg(not(windows))]
+fn filename_unsafe_on_windows(_raw: &str) -> bool {
+    false
 }
 
 /// Extracts a directory path's final component as an owned `String`, for use
@@ -2030,10 +2110,11 @@ fn reject_output_inside_input_dir(input_path: &str, output_path: &str) -> Result
 
 /// Resolves the decrypt output path when `-o` was omitted, in precedence
 /// order:
-///   (a) a sanitized embedded filename, placed as a sibling of `input_path`
-///       (its parent directory, not the current working directory -- this
-///       keeps behavior consistent with (b)'s directory-preserving
-///       heuristic below);
+///   (a) a sanitized embedded filename, revalidated as landing at a direct
+///       child of `input_path`'s own parent directory with no filesystem
+///       I/O, placed as a sibling of `input_path` (its parent directory,
+///       not the current working directory -- this keeps behavior
+///       consistent with (b)'s directory-preserving heuristic below);
 ///   (b) `input_path` with a trailing ".pqe" stripped (directory-preserving);
 ///   (c) an error asking for an explicit `--output`.
 ///
@@ -2051,7 +2132,23 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| std::path::Path::new("."));
-            return Ok(parent.join(safe_name).to_string_lossy().into_owned());
+            let joined = parent.join(&safe_name);
+            // Revalidate structurally, with no filesystem I/O (the output
+            // doesn't exist yet, so `canonicalize` isn't an option): the
+            // join must have landed at exactly `parent`/`safe_name`, never
+            // anywhere else. `sanitize_embedded_filename` already
+            // guarantees `safe_name` is a single safe `Normal` component,
+            // so this should always hold in practice -- it exists as a
+            // last-line structural check per TODO.md's remediation
+            // guidance, independent of and not trusting any single
+            // upstream invariant. If it ever fails, fall through to the
+            // same `.pqe`-suffix-stripping fallback used when sanitization
+            // itself rejects the name, rather than erroring outright.
+            if joined.parent() == Some(parent)
+                && joined.file_name() == Some(std::ffi::OsStr::new(safe_name.as_str()))
+            {
+                return Ok(joined.to_string_lossy().into_owned());
+            }
         }
     }
     if let Some(stripped) = input_path.strip_suffix(".pqe") {

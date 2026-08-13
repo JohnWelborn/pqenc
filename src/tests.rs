@@ -726,14 +726,22 @@ mod metadata_tests {
 
     #[test]
     fn test_sanitize_accepts_ordinary_filenames() {
-        for good in [
-            "report.pdf",
-            "my archive.tar.gz",
-            "IMG_0001.JPG",
-            "2024-01-01T12:00:00.txt",
-        ] {
+        for good in ["report.pdf", "my archive.tar.gz", "IMG_0001.JPG", ".hidden"] {
             assert_eq!(sanitize_embedded_filename(good).as_deref(), Some(good));
         }
+    }
+
+    // The colon in a timestamp-style name is ordinary and must be accepted
+    // on Unix, but is Windows-reserved (see `filename_unsafe_on_windows`) --
+    // kept platform-specific rather than in the shared accept list above,
+    // which windows-latest CI also executes.
+    #[test]
+    #[cfg(not(windows))]
+    fn test_sanitize_accepts_colon_in_timestamp_name_on_unix() {
+        assert_eq!(
+            sanitize_embedded_filename("2024-01-01T12:00:00.txt").as_deref(),
+            Some("2024-01-01T12:00:00.txt")
+        );
     }
 
     #[test]
@@ -2201,6 +2209,124 @@ mod format_tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_decrypt_falls_back_safely_for_windows_unsafe_embedded_filename_pqe3() {
+        // SECURITY: on Windows, PathBuf::join/push treats a drive-relative
+        // name like "C:restore.txt" specially -- per the stdlib docs, "if
+        // `path` has a prefix but no root, it replaces `self`" -- so
+        // naively joining it onto the input file's directory would
+        // silently discard that directory and resolve against the CWD of
+        // whatever drive the embedded name names, nowhere near the
+        // encrypted input. Rejection must make decrypt fall back to the
+        // same .pqe-stripped sibling path the pure traversal tests above
+        // assert on -- never attempt (or silently succeed at) writing
+        // anywhere else. Deliberately does not touch the real C:\ drive or
+        // change the process's actual cwd -- both unsafe in a parallel test
+        // binary -- because a correct fix never gets far enough to try.
+        for malicious_name in ["C:restore.txt", "restore.txt:hidden.exe", "CON", "evil."] {
+            let dir = TempDir::new().unwrap();
+            let (file_bytes, priv_pem) = build_test_pqe3_file(
+                &[(METADATA_FIELD_FILENAME, malicious_name.as_bytes())],
+                b"malicious sender content",
+                true,
+            );
+
+            let sub_dir = dir.path().join("archive");
+            fs::create_dir(&sub_dir).unwrap();
+            let input_path = sub_dir.join("backup.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let result = decrypt_file(
+                input_path.to_str().unwrap(),
+                None,
+                priv_path.to_str().unwrap(),
+                None,
+            );
+            assert!(result.is_ok(), "{:?} -> {:?}", malicious_name, result.err());
+
+            let expected_output = sub_dir.join("backup");
+            assert!(
+                expected_output.exists(),
+                "expected fallback output at {:?} for embedded name {:?}",
+                expected_output,
+                malicious_name
+            );
+            assert_eq!(
+                fs::read(&expected_output).unwrap(),
+                b"malicious sender content"
+            );
+
+            // Nothing besides the input and the fallback output may exist:
+            // proves rejection actually prevented an attempted write under
+            // the malicious name, not just that some other file happened
+            // to win.
+            let entries: std::collections::BTreeSet<String> = fs::read_dir(&sub_dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            let expected: std::collections::BTreeSet<String> = ["backup.pqe", "backup"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+            assert_eq!(
+                entries, expected,
+                "unexpected extra file for embedded name {:?}: {:?}",
+                malicious_name, entries
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_decrypt_falls_back_safely_for_windows_unsafe_embedded_filename_pqe4() {
+        // Same guarantee via PQE4's different metadata code path -- see the
+        // pqe3/pqe4 traversal test pair above for why this isn't redundant
+        // coverage.
+        for malicious_name in ["C:restore.txt", "restore.txt:hidden.exe", "CON", "evil."] {
+            let dir = TempDir::new().unwrap();
+            let (file_bytes, priv_pem) = build_test_pqe4_file(
+                &[(METADATA_FIELD_FILENAME, malicious_name.as_bytes())],
+                b"malicious sender content",
+                true,
+            );
+
+            let sub_dir = dir.path().join("archive");
+            fs::create_dir(&sub_dir).unwrap();
+            let input_path = sub_dir.join("backup.pqe");
+            fs::write(&input_path, &file_bytes).unwrap();
+            let priv_path = dir.path().join("priv.pem");
+            fs::write(&priv_path, &priv_pem).unwrap();
+
+            let result = decrypt_file(
+                input_path.to_str().unwrap(),
+                None,
+                priv_path.to_str().unwrap(),
+                None,
+            );
+            assert!(result.is_ok(), "{:?} -> {:?}", malicious_name, result.err());
+
+            let expected_output = sub_dir.join("backup");
+            assert!(expected_output.exists());
+            assert_eq!(
+                fs::read(&expected_output).unwrap(),
+                b"malicious sender content"
+            );
+
+            let entries: std::collections::BTreeSet<String> = fs::read_dir(&sub_dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            let expected: std::collections::BTreeSet<String> = ["backup.pqe", "backup"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+            assert_eq!(entries, expected);
+        }
+    }
+
     #[test]
     fn test_decrypt_rejects_missing_checksum_trailer_marker() {
         // The checksum trailer marker is mandatory now that PQE1/PQE2
@@ -2273,6 +2399,97 @@ mod format_tests {
             body, expected_body,
             "reused handle must read back the exact verified body bytes"
         );
+    }
+}
+
+// Windows-only filename-sanitization hardening: exercises the additional
+// rejections `sanitize_embedded_filename` (via `filename_unsafe_on_windows`)
+// applies on Windows only -- drive-relative/prefixed names, NTFS Alternate
+// Data Stream syntax, reserved MS-DOS device basenames, and trailing
+// dot/space -- none of which are unsafe (or even meaningful) on Unix, so
+// they can't live in the shared, non-cfg-gated `metadata_tests` module
+// without producing false failures on non-Windows CI runners. See
+// `windows_acl_tests` below for why this only runs when actually compiled
+// and executed on Windows (the CI `windows-latest` runner, or a real
+// Windows machine).
+#[cfg(windows)]
+mod windows_filename_tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_rejects_drive_relative_and_prefixed_names() {
+        for bad in ["C:restore.txt", "C:\\restore.txt", "c:evil", "z:x"] {
+            assert!(
+                sanitize_embedded_filename(bad).is_none(),
+                "should reject {:?} on Windows",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_rejects_alternate_data_stream_syntax() {
+        for bad in ["evil.txt:hidden.exe", "report.pdf:secret"] {
+            assert!(
+                sanitize_embedded_filename(bad).is_none(),
+                "should reject ADS syntax {:?} on Windows",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_rejects_reserved_device_basenames() {
+        for bad in [
+            "CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9",
+            "NUL.txt", "con.tar.gz", "Com3.log", "COM\u{b9}", "LPT\u{b2}",
+        ] {
+            assert!(
+                sanitize_embedded_filename(bad).is_none(),
+                "should reject reserved device name {:?} on Windows",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_rejects_other_reserved_characters() {
+        for bad in ["a<b", "a>b", "a\"b", "a|b", "a?b", "a*b", "a\tb", "a\x01b"] {
+            assert!(
+                sanitize_embedded_filename(bad).is_none(),
+                "should reject reserved character in {:?} on Windows",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_rejects_trailing_dot_or_space() {
+        for bad in ["evil.", "evil ", "report.pdf.", "report.pdf "] {
+            assert!(
+                sanitize_embedded_filename(bad).is_none(),
+                "should reject trailing dot/space {:?} on Windows",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_still_accepts_ordinary_names_on_windows() {
+        // Regression guard: the new Windows-only checks must not reject
+        // ordinary filenames a real `encrypt_file` run would embed.
+        for good in ["report.pdf", "my archive.tar.gz", "IMG_0001.JPG", "backup.tar.gz"] {
+            assert_eq!(sanitize_embedded_filename(good).as_deref(), Some(good));
+        }
+    }
+
+    #[test]
+    fn test_resolve_decrypt_output_falls_back_for_drive_relative_name() {
+        // Pure string/Path logic -- no filesystem I/O, so nothing here
+        // touches the real C:\ drive or the process's actual cwd.
+        let resolved =
+            resolve_decrypt_output("C:\\archive\\backup.pqe", Some("C:restore.txt")).unwrap();
+        assert_eq!(resolved, "C:\\archive\\backup");
     }
 }
 
