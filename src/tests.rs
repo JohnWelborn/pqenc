@@ -2259,18 +2259,21 @@ mod format_tests {
                 b"malicious sender content"
             );
 
-            // Nothing besides the input and the fallback output may exist:
-            // proves rejection actually prevented an attempted write under
-            // the malicious name, not just that some other file happened
-            // to win.
+            // Nothing besides the input, the fallback output, and its
+            // sibling lock file (left behind by design -- see
+            // acquire_output_lock's doc comment: pqenc never deletes it)
+            // may exist: proves rejection actually prevented an attempted
+            // write under the malicious name, not just that some other
+            // file happened to win.
             let entries: std::collections::BTreeSet<String> = fs::read_dir(&sub_dir)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            let expected: std::collections::BTreeSet<String> = ["backup.pqe", "backup"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let expected: std::collections::BTreeSet<String> =
+                ["backup.pqe", "backup", "backup.lock"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
             assert_eq!(
                 entries, expected,
                 "unexpected extra file for embedded name {:?}: {:?}",
@@ -2315,14 +2318,17 @@ mod format_tests {
                 b"malicious sender content"
             );
 
+            // See the matching comment in the pqe3 test above: the sibling
+            // lock file is left behind by design and expected here too.
             let entries: std::collections::BTreeSet<String> = fs::read_dir(&sub_dir)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            let expected: std::collections::BTreeSet<String> = ["backup.pqe", "backup"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let expected: std::collections::BTreeSet<String> =
+                ["backup.pqe", "backup", "backup.lock"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
             assert_eq!(entries, expected);
         }
     }
