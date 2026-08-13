@@ -95,16 +95,34 @@ Encrypted output is written with mode `0600` (owner read/write only). If a backu
 agent running as a different user needs to read it, adjust permissions or ownership
 after encryption.
 
-Encryption refuses to overwrite an existing output file. Output is claimed by
-creating a small placeholder file at the destination path before any encryption
-work begins -- this claim is also what makes the "refuses to overwrite" check
-atomic and race-free -- and the real ciphertext is streamed to a sibling
-temporary file and renamed into place only on success. An ordinary failure
-removes the placeholder immediately, so a normal retry to the same path just
-works. A hard kill (e.g. `SIGKILL`) or power loss can't run that cleanup and
-may leave the placeholder behind, but pqenc recognizes its own placeholders
-and safely reclaims them on the next attempt to the same path, so retries are
-not permanently blocked.
+Encryption refuses to overwrite an existing output file. Before touching the
+destination, pqenc takes an exclusive OS-level lock (`flock` on Unix,
+`LockFileEx` on Windows) on a sibling `<output>.lock` file, then claims the
+destination itself by creating a small placeholder file there -- this claim is
+also what makes the "refuses to overwrite" check atomic and race-free -- and
+the real ciphertext is streamed to a separate temporary file and renamed into
+place only on success. If a second pqenc invocation targets the same output
+path while the first is still running, it fails immediately with a clear
+error instead of racing it or silently overwriting its result; it never
+blocks waiting for the first to finish. An ordinary failure removes the
+placeholder immediately, so a normal retry to the same path just works. A hard
+kill (e.g. `SIGKILL`) or power loss can't run that cleanup and may leave the
+placeholder behind, but pqenc recognizes its own placeholders and safely
+reclaims them on the very next attempt to the same path -- reclaim no longer
+waits out a timer; it only requires that no process still holds the lock.
+
+The `<output>.lock` file itself is intentionally left behind after every run
+-- its presence on disk is not a sign of anything still running, only the
+OS-held lock is. **Do not delete it while a pqenc run to that output path
+might still be in progress**: doing so can let a second process take a lock on
+a freshly recreated file while the first still holds its lock on the original
+one, defeating the protection this mechanism provides.
+
+Concurrent-run protection relies on OS advisory locks and is well-tested on
+local disks, but may be unreliable on some network-filesystem configurations
+(for example, NFSv3 without a correctly running `lockd`/`statd`) -- avoid
+running concurrent pqenc invocations against the same output path on such
+filesystems.
 
 `pqenc encrypt` always writes the current file format, `PQE4`: plaintext is
 divided into fixed 8 GiB segments, each encrypted under its own independently

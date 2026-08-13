@@ -12,10 +12,6 @@ fn pqenc_binary() -> String {
 /// have no access to private items.
 const EXPECTED_RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
 
-/// Must match `RESERVATION_STALE_AGE` in src/main.rs. Duplicated for the
-/// same reason as `EXPECTED_RESERVATION_MARKER` above.
-const RECLAIM_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(300);
-
 #[test]
 fn test_full_workflow_small_file() {
     let env = TempTestEnv::new();
@@ -695,9 +691,11 @@ fn test_encrypted_output_permissions() {
     );
 }
 
-/// Regression test for partial output on interrupted encryption, and for
-/// TODO.md #1's fix: a SIGKILL'd run must leave a reclaimable placeholder,
-/// not a permanent blocker.
+/// Regression test for partial output on interrupted encryption: a
+/// SIGKILL'd run must leave a reclaimable placeholder, not a permanent
+/// blocker, and that reclaim must work on the very next attempt with no
+/// artificial delay -- proving liveness is determined by the OS lock
+/// releasing on process death, not by elapsed time.
 ///
 /// Kills pqenc mid-stream and asserts nothing resembling a finished backup was
 /// left at the output path. Against the pre-atomicity implementation, which
@@ -791,20 +789,15 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
         "Temp file should hold the real output stream"
     );
 
-    // Follow-up: retry is no longer permanently blocked. Reclaim requires
-    // the placeholder to be RECLAIM_STALE_AGE old (so a live concurrent run
-    // is never mistaken for a dead one) -- this process's own placeholder
-    // is only milliseconds old, so backdate its mtime to simulate a retry
-    // long after the crash, the way the real motivating scenario actually
-    // plays out, without the test itself sleeping for minutes.
-    filetime::set_file_mtime(
-        &encrypted_path,
-        filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - RECLAIM_STALE_AGE - Duration::from_secs(1),
-        ),
-    )
-    .unwrap();
-
+    // Follow-up: retry is no longer permanently blocked, and needs no delay
+    // or mtime manipulation to prove it: liveness is now determined solely
+    // by whether the sibling `<output>.lock` is held, not by elapsed time.
+    // `child.wait()` above only returns once the kernel has fully torn down
+    // the killed process -- which includes closing every fd, releasing its
+    // flock, before `wait()`/`waitpid()` can return -- so the lock is
+    // already free and reclaim is immediately available on this very next
+    // attempt, with no artificial delay.
+    //
     // A second, real (non-killed) encrypt to the exact same output path must
     // now succeed -- the leftover placeholder must be recognized as pqenc's
     // own and reclaimed.
@@ -850,6 +843,134 @@ fn test_encrypt_killed_midstream_leaves_reclaimable_placeholder() {
         leftovers.len(),
         "Successful retry should not leave a new temp artifact behind"
     );
+}
+
+/// Regression test: two real, concurrently-running pqenc processes
+/// targeting the same output path must never race to completion and
+/// clobber one another. The second process must fail fast (an immediate,
+/// clear contention error), never hang waiting for the first, and never
+/// touch the first process's placeholder or temp file.
+///
+/// Deliberately not `#[cfg(unix)]`-gated -- unlike the SIGKILL test above,
+/// this is the one test in the suite that exercises lock contention on
+/// Windows' `LockFileEx` path, not just Unix `flock`.
+///
+/// Process A is fed via an unclosed stdin pipe, the same technique the
+/// SIGKILL test above uses, so it stays genuinely mid-operation (holding
+/// the output lock) for as long as this test needs, without relying on
+/// timing.
+#[test]
+fn test_second_concurrent_encrypt_to_same_output_is_rejected_not_a_hang() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let output_path = env.file_path("contended.pqe");
+
+    let mut a = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            "-",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = a.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let block = vec![0xABu8; 64 * 1024];
+        while stdin.write_all(&block).is_ok() {}
+    });
+
+    // Wait for A's claim to succeed: placeholder creation happens strictly
+    // after lock acquisition in program order (see acquire_output_lock and
+    // claim_output_and_temp in src/main.rs), so seeing the exact marker
+    // here proves the lock is now held.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && fs::read(&output_path).ok().as_deref() != Some(EXPECTED_RESERVATION_MARKER)
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read(&output_path).ok().as_deref(),
+        Some(EXPECTED_RESERVATION_MARKER),
+        "process A never reached a claimed state"
+    );
+
+    // A, now past its claim, creates its own temp file immediately
+    // afterward (no fallible step in between in encrypt_file_with_segment_size)
+    // -- poll briefly for it, then capture the count before B runs so B's
+    // effect can be isolated below.
+    let dir = output_path.parent().unwrap().to_path_buf();
+    let temp_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < temp_deadline && temp_artifacts(&dir).is_empty() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let temp_count_before_b = temp_artifacts(&dir).len();
+    assert!(
+        temp_count_before_b > 0,
+        "process A should already have its own temp file by now"
+    );
+
+    // Process B: targets the SAME output while A is still running. Must
+    // fail fast, not hang waiting for A.
+    let other_input = env.create_file("b_input.txt", b"process B's content");
+    let mut b = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            other_input.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let b_deadline = Instant::now() + Duration::from_secs(5);
+    let b_status = loop {
+        if let Some(status) = b.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < b_deadline,
+            "process B did not exit within 5s -- it appears to be blocking on the lock \
+            instead of failing fast"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        !b_status.success(),
+        "a second concurrent encrypt to the same output must fail"
+    );
+
+    // No clobbering: A's placeholder is untouched, and B never even got far
+    // enough to create its own temp file -- the temp-file count must be
+    // exactly what it was before B ran (A's own, unchanged).
+    assert_eq!(
+        fs::read(&output_path).unwrap(),
+        EXPECTED_RESERVATION_MARKER,
+        "process A's placeholder must survive process B's rejected attempt untouched"
+    );
+    assert_eq!(
+        temp_artifacts(&dir).len(),
+        temp_count_before_b,
+        "process B must fail before creating a temp file"
+    );
+
+    a.kill().unwrap();
+    a.wait().unwrap();
+    let _ = writer.join();
 }
 
 /// Run `generate-keys` with stdin closed. Only for checks that must fail

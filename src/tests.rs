@@ -1180,18 +1180,18 @@ mod claim_output_and_temp_tests {
         let dir = TempDir::new().unwrap();
         let output_path = dir.path().join("output.pqe");
 
-        let (output_guard, temp_path) =
+        let claim =
             claim_output_and_temp(output_path.to_str().unwrap(), "test claim context").unwrap();
 
         assert!(
-            !std::path::Path::new(&temp_path).exists(),
+            !std::path::Path::new(&claim.temp_path).exists(),
             "claim_output_and_temp must not create the temp file itself"
         );
         assert!(
             output_path.exists(),
             "output path must be claimed immediately"
         );
-        drop(output_guard);
+        drop(claim);
     }
 
     #[test]
@@ -1202,15 +1202,15 @@ mod claim_output_and_temp_tests {
         let dir = TempDir::new().unwrap();
         let output_path = dir.path().join("output.pqe");
 
-        let (output_guard, temp_path) =
+        let claim =
             claim_output_and_temp(output_path.to_str().unwrap(), "test claim context").unwrap();
 
         const SENTINEL: &[u8] = b"pre-existing file that this process does not own";
-        fs::write(&temp_path, SENTINEL).unwrap();
+        fs::write(&claim.temp_path, SENTINEL).unwrap();
 
         // Mirror exactly what every real caller does immediately after
         // claim_output_and_temp.
-        let create_result = create_new_exclusive(&temp_path, OWNER_ONLY_MODE);
+        let create_result = create_new_exclusive(&claim.temp_path, OWNER_ONLY_MODE);
         assert!(
             create_result.is_err(),
             "create_new_exclusive must fail: the path is already occupied"
@@ -1225,7 +1225,7 @@ mod claim_output_and_temp_tests {
         // create above. create_new never truncates, so the sentinel's
         // original bytes must survive intact.
         assert_eq!(
-            fs::read(&temp_path).unwrap(),
+            fs::read(&claim.temp_path).unwrap(),
             SENTINEL,
             "pre-existing file at the colliding temp path must not be modified or deleted"
         );
@@ -1233,7 +1233,7 @@ mod claim_output_and_temp_tests {
         // output_guard's own claim is a separate, correctly-owned file --
         // confirm the fix didn't disturb it.
         assert!(output_path.exists());
-        drop(output_guard);
+        drop(claim);
         assert!(
             !output_path.exists(),
             "output_guard still cleans up its own file normally"
@@ -1241,40 +1241,37 @@ mod claim_output_and_temp_tests {
     }
 }
 
-// Regression tests for TODO.md #1's reclaim fix: a placeholder left behind
-// by a process that was SIGKILLed or lost power before it could clean up
-// (TempFileGuard::Drop cannot run in either case) must be recognized as
-// pqenc's own stale reservation and safely reclaimed on the next attempt --
-// but only when it is *exactly* that, and old enough that it can't
-// plausibly belong to a still-running concurrent pqenc process.
+// Regression tests for reservation-placeholder reclaim: a placeholder left
+// behind by a process that was SIGKILLed or lost power before it could
+// clean up (TempFileGuard::Drop cannot run in either case) must be
+// recognized as pqenc's own orphaned reservation and safely reclaimed on
+// the next attempt -- but only once this process holds the sibling
+// `<output>.lock` exclusively, since that's what proves no cooperating
+// pqenc process can still own it. Liveness is determined solely by whether
+// that lock is held; elapsed time is never consulted.
 mod reservation_reclaim_tests {
     use super::*;
-    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
-    fn backdate(path: &std::path::Path, age: Duration) {
-        let when = SystemTime::now() - age;
-        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
-    }
-
     #[test]
-    fn test_stale_marker_placeholder_is_reclaimed_and_claim_succeeds() {
+    fn test_orphaned_placeholder_is_reclaimed_regardless_of_age() {
         let dir = TempDir::new().unwrap();
         let output_path = dir.path().join("output.pqe");
 
         fs::write(&output_path, RESERVATION_MARKER).unwrap();
-        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
+        // Deliberately not backdated -- mtime is "now". Age is no longer
+        // consulted at all: reclaim must succeed as soon as nothing holds
+        // the sibling lock, regardless of how fresh the placeholder looks.
 
-        let (output_guard, _temp_path) =
-            claim_output_and_temp(output_path.to_str().unwrap(), "test claim context")
-                .expect("a stale reservation placeholder must be silently reclaimed");
+        let claim = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context")
+            .expect("an orphaned placeholder must be reclaimed regardless of its age");
 
         assert_eq!(
             fs::read(&output_path).unwrap(),
             RESERVATION_MARKER,
             "claim must leave a fresh reservation placeholder in place"
         );
-        drop(output_guard);
+        drop(claim);
         assert!(
             !output_path.exists(),
             "guard still cleans up the reclaimed placeholder normally"
@@ -1282,25 +1279,34 @@ mod reservation_reclaim_tests {
     }
 
     #[test]
-    fn test_fresh_marker_placeholder_is_not_reclaimed() {
-        // Simulates a genuinely concurrent, still-running pqenc process:
-        // its placeholder legitimately holds the exact marker bytes for its
-        // entire run. Without the age gate this would be wrongly reclaimed
-        // out from under it.
+    fn test_placeholder_is_not_reclaimed_while_a_competitor_holds_the_lock() {
+        // Simulates a genuinely concurrent, still-running pqenc process by
+        // acquiring the sibling lock directly, the same way a real
+        // competitor's claim_output_and_temp call would. This is the
+        // previously-missing coverage: earlier tests only ever simulated
+        // liveness via a fresh mtime, never an actually-held lock.
         let dir = TempDir::new().unwrap();
         let output_path = dir.path().join("output.pqe");
         fs::write(&output_path, RESERVATION_MARKER).unwrap();
 
+        let competitor_lock = acquire_output_lock(output_path.to_str().unwrap())
+            .expect("test setup: competitor must be able to take the lock first");
+
         let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
         assert!(
             result.is_err(),
-            "a too-fresh placeholder must not be reclaimed, even with matching content"
+            "a placeholder guarded by a live competitor's lock must not be reclaimed"
         );
         assert_eq!(
             fs::read(&output_path).unwrap(),
             RESERVATION_MARKER,
-            "the live placeholder must survive a failed claim attempt untouched"
+            "the live competitor's placeholder must survive a failed claim attempt untouched"
         );
+
+        drop(competitor_lock);
+        let claim = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context")
+            .expect("once the competitor's lock is released, the same placeholder is reclaimable");
+        drop(claim);
     }
 
     #[test]
@@ -1310,7 +1316,6 @@ mod reservation_reclaim_tests {
 
         let sentinel = vec![b'X'; RESERVATION_MARKER.len()];
         fs::write(&output_path, &sentinel).unwrap();
-        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
 
         let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
         assert!(result.is_err(), "unrelated content must never be reclaimed");
@@ -1328,7 +1333,6 @@ mod reservation_reclaim_tests {
 
         const SENTINEL: &[u8] = b"short";
         fs::write(&output_path, SENTINEL).unwrap();
-        backdate(&output_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
 
         let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
         assert!(result.is_err());
@@ -1343,7 +1347,6 @@ mod reservation_reclaim_tests {
         let dir = TempDir::new().unwrap();
         let target_path = dir.path().join("target_with_marker_bytes");
         fs::write(&target_path, RESERVATION_MARKER).unwrap();
-        backdate(&target_path, RESERVATION_STALE_AGE + Duration::from_secs(1));
 
         let link_path = dir.path().join("output.pqe");
         symlink(&target_path, &link_path).unwrap();
@@ -1359,6 +1362,32 @@ mod reservation_reclaim_tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read(&target_path).unwrap(), RESERVATION_MARKER);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_lock_path_symlink_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let output_path = dir.path().join("output.pqe");
+        let evil_target = dir.path().join("evil_target");
+        fs::write(
+            &evil_target,
+            b"unrelated file pqenc must never open or lock",
+        )
+        .unwrap();
+        symlink(&evil_target, dir.path().join("output.pqe.lock")).unwrap();
+
+        let result = claim_output_and_temp(output_path.to_str().unwrap(), "test claim context");
+        assert!(
+            result.is_err(),
+            "a symlinked lockfile path must be refused, never followed"
+        );
+        assert_eq!(
+            fs::read(&evil_target).unwrap(),
+            b"unrelated file pqenc must never open or lock"
+        );
     }
 }
 

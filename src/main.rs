@@ -168,6 +168,13 @@
 //!   segment is independently keyed and at most 8 GiB, comfortably inside
 //!   the safe bound, regardless of total file size, so this does not apply
 //!   to any file `pqenc` produces or reads.
+//! - Concurrent-run protection for a shared output path relies on OS
+//!   advisory file locks (`flock` on Unix, `LockFileEx` on Windows, via
+//!   `std::fs::File::try_lock`). This is well-tested on local disks but is
+//!   not guaranteed reliable on every network-filesystem configuration
+//!   (e.g. NFSv3 without a correctly running `lockd`/`statd`) -- avoid
+//!   running concurrent `pqenc` invocations against the same output path on
+//!   such filesystems.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
@@ -220,25 +227,14 @@ const _: () = assert!(
     "SEGMENT_SIZE must be a whole number of CHUNK_SIZE-sized chunks"
 );
 
-// Reservation-placeholder marker and staleness threshold for
-// claim_output_and_temp's reclaim logic (TODO.md #1). Deliberately does not
-// start with MAGIC_V3 above, so it can never be mistaken for real
-// ciphertext by anything, including this tool, that inspects the file.
+// Reservation-placeholder marker for claim_output_and_temp's reclaim logic.
+// Deliberately does not start with MAGIC_V3 above, so it can never be
+// mistaken for real ciphertext by anything, including this tool, that
+// inspects the file. Liveness of the process that wrote a given placeholder
+// is never inferred from this marker or from elapsed time -- see
+// acquire_output_lock and claim_output_and_temp below, which use an OS
+// advisory lock on a sibling `<output_path>.lock` file instead.
 const RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
-
-// Minimum age a placeholder must have before it's eligible for reclaim.
-// Without this, a second, still-running pqenc process targeting the same
-// output_path would look "stale" to a concurrent invocation the instant its
-// placeholder is written (its marker content is indistinguishable from a
-// genuinely dead one for the run's entire duration), so the second process
-// would reclaim (delete) the first one's live claim and race it to the
-// final rename -- exactly the clobber this claim mechanism exists to
-// prevent. A placeholder from the actual motivating case (SIGKILL, power
-// loss, discovered on a later retry) is essentially never retried within
-// this window, so this doesn't weaken the fix -- it only means reclaim
-// isn't available *yet* in that narrow window, falling back to today's
-// plain "already exists" error, never worse than pre-fix behavior.
-const RESERVATION_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(300);
 
 const AAD_CHUNK_TYPE_NORMAL: u8 = 0x00;
 const AAD_CHUNK_TYPE_LAST: u8 = 0x01;
@@ -1985,8 +1981,8 @@ fn resolve_prospective_output_path(output_path: &str) -> Option<std::path::PathB
 /// `directory_basename`). This is a footgun guard against accidental
 /// self-inclusion, not a hardened defense against an adversary who can
 /// modify the filesystem between this check and the later write -- the
-/// same pragmatic, fail-safe posture `is_stale_reservation_placeholder` and
-/// `claim_output_and_temp` already take elsewhere in this file.
+/// same pragmatic, fail-safe posture `reservation_placeholder_matches_marker`
+/// and `claim_output_and_temp` already take elsewhere in this file.
 fn reject_output_inside_input_dir(input_path: &str, output_path: &str) -> Result<()> {
     let Ok(canonical_input) = std::path::Path::new(input_path).canonicalize() else {
         return Ok(());
@@ -2042,20 +2038,118 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
     bail!("--output is required: input does not end in .pqe and no filename was embedded in the encrypted file")
 }
 
-/// Claims `output_path` exclusively (O_CREAT|O_EXCL) and prepares a sibling
-/// temp-file path, returning the output guard armed and the temp path as a
-/// plain, unclaimed `String`. Does not create the temp file itself -- callers
-/// do that separately (since they may need to do more work first) and must
-/// only construct the temp file's own `TempFileGuard` AFTER their
-/// `create_new_exclusive` on it succeeds. Arming a guard on the temp path
-/// before it's claimed would let an EEXIST collision (this exact random name
-/// already occupied, e.g. by an attacker) drop the guard and delete a file
-/// this process never created -- the same hazard `write_new_file_synced`
-/// documents and avoids. Shared by `encrypt_file`'s one claim site and
-/// `decrypt_file`'s two (an explicit `-o` claims immediately; an omitted
-/// `-o` claims after the metadata-derived default is known), so the
-/// guard-declaration-order contract (the fix for bug 7fc6654) can't drift
-/// between call sites.
+/// RAII holder of the exclusive OS lock on `<output_path>.lock`. Keeping
+/// this `File` alive for the operation's duration is what holds the lock:
+/// `std::fs::File::try_lock`'s contract guarantees the lock releases when
+/// every open handle to it (including this one) closes -- which happens
+/// automatically on `Drop`, even after SIGKILL or a panic, since the OS
+/// reclaims file descriptors at process exit before `Drop` would ever need
+/// to run. There is nothing to explicitly unlock and nothing to unlink --
+/// unlike `TempFileGuard`, this guard's only job is to stay alive.
+struct OutputLockGuard {
+    _file: File,
+}
+
+/// Acquires the sibling `<output_path>.lock` file's exclusive OS lock,
+/// non-blocking (`flock` on Unix, `LockFileEx` on Windows, via
+/// `std::fs::File::try_lock`). On success the returned guard holds the lock
+/// for as long as it stays alive. On contention, fails immediately with a
+/// clear error instead of waiting for the other process -- an unattended
+/// (cron) invocation must never hang indefinitely.
+///
+/// Opens with `.create(true).write(true)`, never `create_new`/O_EXCL: a
+/// lockfile left behind by a previous, now-exited `pqenc` run must be
+/// reused, not replaced. This matters because `flock`/`LockFileEx` locks
+/// attach to the open file description/inode, not the pathname -- deleting
+/// and recreating this file would let a second process lock a brand-new
+/// inode at the same path while a first process still held its lock on the
+/// old one, silently defeating mutual exclusion. For the same reason,
+/// pqenc must never delete this file: its on-disk presence after a run is
+/// harmless and expected, and only the OS-held lock -- never the file's
+/// existence -- indicates liveness. No fsync here, unlike
+/// `create_reservation_placeholder`: this file's survival across a crash
+/// has no correctness consequence, since a reboot unconditionally releases
+/// every lock.
+fn acquire_output_lock(output_path: &str) -> Result<OutputLockGuard> {
+    let lock_path = format!("{}.lock", output_path);
+
+    // Refuse a pre-existing symlink before ever opening: `.create(true)`
+    // below follows symlinks (unlike create_new_exclusive's O_EXCL
+    // elsewhere in this file), so an attacker-planted symlink here could
+    // otherwise make pqenc open and lock an arbitrary path it can write to.
+    if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("Refusing to use {} for locking: it is a symlink", lock_path);
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(OWNER_ONLY_MODE); // only applied if this create() actually creates the file
+    }
+    let file = opts
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open lockfile {}", lock_path))?;
+
+    match file.try_lock() {
+        Ok(()) => Ok(OutputLockGuard { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "Another pqenc process appears to be writing to {} (holding an exclusive lock on \
+            {}); refusing to run concurrently against the same destination. Wait for it to \
+            finish, or target a different output path.",
+            output_path,
+            lock_path
+        ),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("Failed to acquire lock on {}", lock_path))
+        }
+    }
+}
+
+/// Bundles everything `claim_output_and_temp` reserves for one
+/// encrypt/decrypt run: the reservation placeholder guard, the randomized
+/// temp-file path the caller creates next, and the exclusive lock on
+/// `<output_path>.lock`. `_lock` is never read (its only job is to stay
+/// alive, per `OutputLockGuard`), but is declared *last* so it drops last
+/// (struct fields drop in declaration order): if this claim is ever dropped
+/// before a successful commit (an error return, an early `bail!`, a
+/// panic), `output_guard` deletes the placeholder *before* the lock
+/// releases. Releasing the lock first would open a window where a second
+/// process could acquire it, correctly see the not-yet-deleted placeholder
+/// as orphaned, and reclaim it -- only for this process's delayed
+/// `TempFileGuard::Drop` to then delete the second process's brand-new
+/// placeholder out from under it.
+#[must_use = "the returned claim holds the lock and the reservation placeholder; \
+              bind it, keep it alive for the whole operation, and disarm \
+              output_guard only after the commit rename succeeds"]
+struct OutputClaim {
+    output_guard: TempFileGuard,
+    temp_path: String,
+    _lock: OutputLockGuard,
+}
+
+/// Claims `output_path` exclusively (O_CREAT|O_EXCL, gated by an OS lock on
+/// a sibling `<output_path>.lock`) and prepares a sibling temp-file path,
+/// returning both plus the output guard armed. Does not create the temp
+/// file itself -- callers do that separately (since they may need to do
+/// more work first) and must only construct the temp file's own
+/// `TempFileGuard` AFTER their `create_new_exclusive` on it succeeds.
+/// Arming a guard on the temp path before it's claimed would let an EEXIST
+/// collision (this exact random name already occupied, e.g. by an
+/// attacker) drop the guard and delete a file this process never created --
+/// the same hazard `write_new_file_synced` documents and avoids. Shared by
+/// `encrypt_file`'s one claim site and `decrypt_file`'s two (an explicit
+/// `-o` claims immediately; an omitted `-o` claims after the
+/// metadata-derived default is known), so the guard-declaration-order
+/// contract (the fix for bug 7fc6654) can't drift between call sites.
+///
+/// The lock is acquired first, before `output_path` is inspected or
+/// created at all (see `acquire_output_lock`) -- this is what makes reclaim
+/// below safe without any age check: while this process holds the lock, no
+/// cooperating pqenc process can be concurrently operating on the same
+/// destination, so a matching placeholder found afterward can only be an
+/// orphan (SIGKILL, power loss), never a live process's claim.
 ///
 /// The placeholder is not left empty: it holds `RESERVATION_MARKER`,
 /// written and fsynced before this function returns. If the process is
@@ -2064,29 +2158,26 @@ fn resolve_decrypt_output(input_path: &str, embedded_filename: Option<&str>) -> 
 /// placeholder is later recognizable as pqenc's own, instead of an
 /// indistinguishable empty stump that permanently blocks every future run
 /// to the same path. On an `AlreadyExists` collision, if the file already
-/// there is confirmed, via `is_stale_reservation_placeholder`, to be
-/// exactly such a placeholder and at least `RESERVATION_STALE_AGE` old (old
-/// enough that it can't plausibly belong to a still-running process), it is
-/// removed and the claim retried exactly once. Any other outcome -- real
-/// content, wrong size, a symlink, too fresh, or the retry itself failing
-/// -- propagates as an error unchanged, same as before this reclaim
-/// behavior existed.
-fn claim_output_and_temp(
-    output_path: &str,
-    claim_context: &str,
-) -> Result<(TempFileGuard, String)> {
+/// there is confirmed, via `reservation_placeholder_matches_marker`, to be
+/// exactly such a placeholder, it is removed and the claim retried exactly
+/// once. Any other outcome -- real content, wrong size, a symlink, or the
+/// retry itself failing -- propagates as an error unchanged, same as before
+/// this reclaim behavior existed.
+fn claim_output_and_temp(output_path: &str, claim_context: &str) -> Result<OutputClaim> {
     use rand::RngExt;
+
+    let output_lock = acquire_output_lock(output_path)?;
 
     let output_guard = match create_reservation_placeholder(output_path) {
         Ok(guard) => guard,
         Err(e)
             if e.kind() == std::io::ErrorKind::AlreadyExists
-                && is_stale_reservation_placeholder(output_path) =>
+                && reservation_placeholder_matches_marker(output_path) =>
         {
             fs::remove_file(output_path)
-                .context("Failed to remove stale reservation placeholder for reclaim")?;
-            // Retry exactly once. If this also fails -- e.g. a genuine race
-            // with another process that claimed the path in the instant
+                .context("Failed to remove orphaned reservation placeholder for reclaim")?;
+            // Retry exactly once. If this also fails -- e.g. some other,
+            // non-cooperating program wrote to output_path in the instant
             // between the check above and this create -- propagate that
             // second error untouched; no loop, no repeated retries.
             create_reservation_placeholder(output_path).context(claim_context.to_string())?
@@ -2096,7 +2187,11 @@ fn claim_output_and_temp(
 
     let temp_path = format!("{}.tmp.{:x}", output_path, rand::rng().random::<u64>());
 
-    Ok((output_guard, temp_path))
+    Ok(OutputClaim {
+        output_guard,
+        temp_path,
+        _lock: output_lock,
+    })
 }
 
 /// Creates `output_path` exclusively and writes+syncs `RESERVATION_MARKER`
@@ -2123,30 +2218,26 @@ fn create_reservation_placeholder(output_path: &str) -> std::io::Result<TempFile
     Ok(guard)
 }
 
-/// Returns true iff `path` is exactly pqenc's own stale reservation
-/// placeholder, safe to delete and reclaim: a *regular file*
-/// (`fs::symlink_metadata`, never `fs::metadata` -- a symlink planted at
-/// `path` must never be followed) of exactly `RESERVATION_MARKER.len()`
-/// bytes, whose content is byte-for-byte `RESERVATION_MARKER`, and whose
-/// mtime is at least `RESERVATION_STALE_AGE` old. Anything else -- wrong
-/// type, wrong size, wrong content, an unreadable/future mtime, or an mtime
-/// that's too recent -- returns false, and the caller must treat the path
-/// as a real, untouchable file. Fails safe throughout: any ambiguity or
-/// I/O error means "not stale."
-fn is_stale_reservation_placeholder(path: &str) -> bool {
+/// Returns true iff `path` is exactly pqenc's own reservation placeholder,
+/// safe to unconditionally reclaim once this process holds `path`'s
+/// sibling lock exclusively (see `claim_output_and_temp`): a *regular
+/// file* (`fs::symlink_metadata`, never `fs::metadata` -- a symlink
+/// planted at `path` must never be followed) of exactly
+/// `RESERVATION_MARKER.len()` bytes, whose content is byte-for-byte
+/// `RESERVATION_MARKER`. Does not consider age/mtime at all: liveness
+/// detection lives entirely in the OS lock, already held by the caller by
+/// the time this runs, so a matching placeholder can only be a leftover
+/// from a process that no longer exists -- never a live one, since a live
+/// one's lock would have made the earlier `acquire_output_lock` call fail
+/// first. Anything else -- wrong type, wrong size, wrong content, or
+/// unreadable -- returns false, and the caller must treat the path as a
+/// real, untouchable file. Fails safe throughout: any ambiguity or I/O
+/// error means "not a reclaimable placeholder."
+fn reservation_placeholder_matches_marker(path: &str) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
     if !meta.is_file() || meta.len() != RESERVATION_MARKER.len() as u64 {
-        return false;
-    }
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
-    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
-        return false; // clock skew (mtime in the future) -- don't reclaim
-    };
-    if age < RESERVATION_STALE_AGE {
         return false;
     }
     fs::read(path)
@@ -2493,7 +2584,9 @@ fn encrypt_file_with_segment_size(
     // a sibling temp file and renames over the placeholder on success, so a
     // failure mid-write can never leave a partial .pqe at output_path. Guard
     // declaration order is the cleanup contract: dropping in reverse closes
-    // fout, unlinks the temp, then unlinks the placeholder.
+    // fout, unlinks the temp, then unlinks the placeholder, then -- last,
+    // since output_claim outlives both and its _lock field drops after its
+    // own output_guard field (see OutputClaim) -- releases the output lock.
     //
     // temp_guard is declared here (before fout) but only assigned below,
     // after create_new_exclusive on the temp path succeeds -- arming it any
@@ -2501,14 +2594,14 @@ fn encrypt_file_with_segment_size(
     // delete a file this process doesn't own (see claim_output_and_temp).
     // Declaring it here rather than after fout keeps the drop order above
     // intact: fout must close before temp_guard tries to unlink it.
-    let (mut output_guard, temp_path) = claim_output_and_temp(
+    let mut output_claim = claim_output_and_temp(
         output_path,
         "Failed to create output file (already exists or permission denied)",
     )?;
     let mut temp_guard: TempFileGuard;
-    let mut fout = create_new_exclusive(&temp_path, OWNER_ONLY_MODE)
+    let mut fout = create_new_exclusive(&output_claim.temp_path, OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
-    temp_guard = TempFileGuard::new(temp_path);
+    temp_guard = TempFileGuard::new(output_claim.temp_path.clone());
 
     // Build header and compute hash for AAD
     let kem_ct_len = ciphertext.as_slice().len() as u32;
@@ -2642,7 +2735,7 @@ fn encrypt_file_with_segment_size(
     fs::rename(temp_guard.path(), output_path)
         .context("Failed to move encrypted file to final destination")?;
     temp_guard.disarm();
-    output_guard.disarm();
+    output_claim.output_guard.disarm();
 
     sync_parent_dir(output_path).context(
         "Failed to sync directory after rename; encrypted output may not survive a crash",
@@ -2991,12 +3084,12 @@ fn decrypt_file_with_segment_size(
     // default is known (see below), since that requires decrypting the
     // metadata region, which requires the private key -- so for that case
     // the preflight still runs first regardless.
-    let early_claim: Option<(String, TempFileGuard, String)> = match output_path {
+    let early_claim: Option<(String, OutputClaim)> = match output_path {
         Some(o) => {
             validate_path(o, false, false, "Output file")?;
-            let (og, temp_path) =
+            let claim =
                 claim_output_and_temp(o, "Output file already exists or cannot be created")?;
-            Some((o.to_string(), og, temp_path))
+            Some((o.to_string(), claim))
         }
         None => None,
     };
@@ -3184,19 +3277,19 @@ fn decrypt_file_with_segment_size(
 
     // Resolve the final output path and claim it, now that a metadata-driven
     // default (if needed) is known. An explicit -o was already claimed above.
-    let (final_output_path, mut output_guard, temp_path) = match early_claim {
-        Some((path, og, temp_path)) => (path, og, temp_path),
+    let (final_output_path, mut output_claim) = match early_claim {
+        Some((path, claim)) => (path, claim),
         None => {
             let embedded = decoded_metadata
                 .as_ref()
                 .and_then(|m| m.filename.as_deref());
             let resolved = resolve_decrypt_output(input_path, embedded)?;
             validate_path(&resolved, false, false, "Output file")?;
-            let (og, temp_path) = claim_output_and_temp(
+            let claim = claim_output_and_temp(
                 &resolved,
                 "Output file already exists or cannot be created",
             )?;
-            (resolved, og, temp_path)
+            (resolved, claim)
         }
     };
 
@@ -3206,9 +3299,9 @@ fn decrypt_file_with_segment_size(
     // before any later fallible return (below), so unlike encrypt_file's
     // matching claim site, declaration order relative to fout doesn't matter
     // here and no deferred-initialization dance is needed.
-    let mut fout = create_new_exclusive(&temp_path, OWNER_ONLY_MODE)
+    let mut fout = create_new_exclusive(&output_claim.temp_path, OWNER_ONLY_MODE)
         .context("Failed to create temporary output file")?;
-    let mut temp_guard = TempFileGuard::new(temp_path);
+    let mut temp_guard = TempFileGuard::new(output_claim.temp_path.clone());
 
     // Perform decryption - any error will trigger cleanup of temp file
     let decrypt_result = (|| -> Result<()> {
@@ -3262,7 +3355,7 @@ fn decrypt_file_with_segment_size(
             fs::rename(&temp_path, &final_output_path)
                 .context("Failed to move decrypted file to final destination")?;
             temp_guard.disarm();
-            output_guard.disarm();
+            output_claim.output_guard.disarm();
             sync_parent_dir(&final_output_path).context(
                 "Failed to sync directory after rename; decrypted output may not survive a crash",
             )?;
