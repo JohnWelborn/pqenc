@@ -2262,3 +2262,130 @@ mod format_tests {
         );
     }
 }
+
+// Windows DACL hardening: these tests only run when actually compiled and
+// executed on Windows (the CI `windows-latest` runner, or a real Windows
+// machine) -- there is nothing to check on Unix, where file permissions are
+// covered separately (see `test_encrypted_output_permissions` and
+// `test_generate_keys_key_file_permissions` in tests/integration_tests.rs).
+#[cfg(windows)]
+mod windows_acl_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::os::windows::ffi::OsStrExt;
+    use tempfile::TempDir;
+
+    /// Returns the set of grantee SIDs (as `S-1-5-...` strings) present in
+    /// `path`'s DACL, and whether that DACL is marked protected
+    /// (`SE_DACL_PROTECTED`, i.e. not merging in ACEs inherited from the
+    /// parent directory). This reads back the raw Win32 security
+    /// descriptor rather than re-deriving the expected SDDL string, so it
+    /// actually exercises what `create_owner_only` produced instead of
+    /// just echoing its own logic back.
+    fn read_dacl(path: &std::path::Path) -> (HashSet<String>, bool) {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{
+            GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let err = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        assert_eq!(
+            err, 0,
+            "GetNamedSecurityInfoW failed with Win32 error {err}"
+        );
+
+        let mut sids = HashSet::new();
+        let ace_count = unsafe { (*dacl).AceCount };
+        for i in 0..u32::from(ace_count) {
+            let mut ace_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+            assert_ne!(
+                unsafe { GetAce(dacl, i, &mut ace_ptr) },
+                0,
+                "GetAce failed for index {i}"
+            );
+            let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+            // ACCESS_ALLOWED_ACE_TYPE (WinNT.h) == 0. This DACL is built
+            // from an SDDL string containing only "(A;;FA;;;...)" entries,
+            // so anything else here is an unexpected ACE and should fail
+            // the test loudly rather than be silently skipped.
+            assert_eq!(
+                header.AceType, 0,
+                "expected only ACCESS_ALLOWED_ACE entries in this DACL"
+            );
+            let ace = unsafe { &*(ace_ptr as *const ACCESS_ALLOWED_ACE) };
+            let sid_ptr = std::ptr::addr_of!(ace.SidStart) as windows_sys::Win32::Security::PSID;
+            sids.insert(windows_security::sid_to_string(sid_ptr).unwrap());
+        }
+
+        let mut control: u16 = 0;
+        let mut revision: u32 = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) },
+            0,
+            "GetSecurityDescriptorControl failed"
+        );
+        let protected = control & SE_DACL_PROTECTED != 0;
+
+        unsafe { LocalFree(sd as _) };
+        (sids, protected)
+    }
+
+    #[test]
+    fn owner_only_mode_gets_hardened_protected_dacl() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("secret.bin");
+        let _f = create_new_exclusive(path.to_str().unwrap(), OWNER_ONLY_MODE).unwrap();
+
+        let (sids, protected) = read_dacl(&path);
+        let expected: HashSet<String> = [
+            windows_security::current_user_sid_string().unwrap(),
+            "S-1-5-18".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            sids, expected,
+            "DACL must grant access to exactly {{current user, SYSTEM}} -- no more, no less"
+        );
+        assert!(
+            protected,
+            "DACL must be protected so the parent directory's ACEs cannot merge in"
+        );
+    }
+
+    #[test]
+    fn distributable_mode_is_not_hardened() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("public.key");
+        let _f = create_new_exclusive(path.to_str().unwrap(), DISTRIBUTABLE_MODE).unwrap();
+
+        let (_sids, protected) = read_dacl(&path);
+        assert!(
+            !protected,
+            "DISTRIBUTABLE_MODE must keep deferring to the parent directory's ACL, \
+            not get the owner-only protected DACL"
+        );
+    }
+}

@@ -12,6 +12,118 @@ fn pqenc_binary() -> String {
 /// have no access to private items.
 const EXPECTED_RESERVATION_MARKER: &[u8] = b"PQENC-RESERVED-PLACEHOLDER\n";
 
+/// Windows DACL inspection, duplicated from `windows_security` (and its
+/// `src/tests.rs` unit tests) for the same reason as
+/// `EXPECTED_RESERVATION_MARKER` above: this crate only drives the compiled
+/// binary as a subprocess and has no access to private items.
+#[cfg(windows)]
+mod windows_dacl {
+    use std::collections::HashSet;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE,
+        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    fn sid_to_string(sid: PSID) -> String {
+        unsafe {
+            let mut string_sid: *mut u16 = std::ptr::null_mut();
+            assert_ne!(ConvertSidToStringSidW(sid, &mut string_sid), 0);
+            let len = (0..).take_while(|&i| *string_sid.offset(i) != 0).count();
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(string_sid, len));
+            LocalFree(string_sid as *mut core::ffi::c_void);
+            s
+        }
+    }
+
+    /// The current process's user SID, in `S-1-5-...` string form.
+    pub(crate) fn current_user_sid() -> String {
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                0
+            );
+            let mut needed: u32 = 0;
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            assert_ne!(needed, 0);
+            let mut buf: Vec<u64> = vec![0u64; needed.div_ceil(8) as usize];
+            assert_ne!(
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    buf.as_mut_ptr() as *mut core::ffi::c_void,
+                    needed,
+                    &mut needed,
+                ),
+                0
+            );
+            let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let sid = sid_to_string(token_user.User.Sid);
+            CloseHandle(token);
+            sid
+        }
+    }
+
+    /// The set of grantee SIDs in `path`'s DACL, and whether that DACL is
+    /// marked protected (blocking ACEs inherited from the parent directory).
+    pub(crate) fn grantees_and_protected(path: &std::path::Path) -> (HashSet<String>, bool) {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let err = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        assert_eq!(err, 0, "GetNamedSecurityInfoW failed: {err}");
+
+        let mut sids = HashSet::new();
+        let ace_count = unsafe { (*dacl).AceCount };
+        for i in 0..u32::from(ace_count) {
+            let mut ace_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+            assert_ne!(unsafe { GetAce(dacl, i, &mut ace_ptr) }, 0);
+            let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+            assert_eq!(
+                header.AceType, 0,
+                "expected only ACCESS_ALLOWED_ACE entries"
+            );
+            let ace = unsafe { &*(ace_ptr as *const ACCESS_ALLOWED_ACE) };
+            let sid_ptr = std::ptr::addr_of!(ace.SidStart) as PSID;
+            sids.insert(sid_to_string(sid_ptr));
+        }
+
+        let mut control: u16 = 0;
+        let mut revision: u32 = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) },
+            0
+        );
+        let protected = control & SE_DACL_PROTECTED != 0;
+
+        unsafe { LocalFree(sd as _) };
+        (sids, protected)
+    }
+}
+
 #[test]
 fn test_full_workflow_small_file() {
     let env = TempTestEnv::new();
@@ -691,6 +803,51 @@ fn test_encrypted_output_permissions() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn test_encrypted_output_permissions_windows() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let input_path = env.create_file("input.txt", b"permission check");
+    let encrypted_path = env.file_path("perms.pqe");
+
+    let output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Same-volume rename preserves the underlying file object (and thus its
+    // security descriptor) on NTFS, so this really asserts the temp file
+    // was created with the hardened DACL, mirroring the Unix mode test above.
+    let (sids, protected) = windows_dacl::grantees_and_protected(&encrypted_path);
+    let expected: std::collections::HashSet<String> =
+        [windows_dacl::current_user_sid(), "S-1-5-18".to_string()]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        sids, expected,
+        "Encrypted output DACL should grant access to exactly {{current user, SYSTEM}}"
+    );
+    assert!(
+        protected,
+        "Encrypted output DACL should be protected against inherited ACEs"
+    );
+}
+
 /// Regression test for partial output on interrupted encryption: a
 /// SIGKILL'd run must leave a reclaimable placeholder, not a permanent
 /// blocker, and that reclaim must work on the very next attempt with no
@@ -1193,6 +1350,54 @@ fn test_generate_keys_key_file_permissions() {
         pub_mode, 0o644,
         "Public key should follow umask, got {:o}",
         pub_mode
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn test_generate_keys_key_file_permissions_windows() {
+    let env = TempTestEnv::new();
+    let pub_path = env.file_path("perm_pub.key");
+    let priv_path = env.file_path("perm_priv.key");
+
+    let output = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_path.to_str().unwrap(),
+            "--private-key",
+            priv_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Key generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (priv_sids, priv_protected) = windows_dacl::grantees_and_protected(&priv_path);
+    let expected: std::collections::HashSet<String> =
+        [windows_dacl::current_user_sid(), "S-1-5-18".to_string()]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        priv_sids, expected,
+        "Private key DACL should grant access to exactly {{current user, SYSTEM}}"
+    );
+    assert!(
+        priv_protected,
+        "Private key DACL should be protected against inherited ACEs"
+    );
+
+    // Deliberately not hardened: the public key is meant to be distributed,
+    // so it should keep deferring to the parent directory's ACL.
+    let (_pub_sids, pub_protected) = windows_dacl::grantees_and_protected(&pub_path);
+    assert!(
+        !pub_protected,
+        "Public key should not get the owner-only protected DACL"
     );
 }
 

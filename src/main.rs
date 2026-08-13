@@ -191,6 +191,9 @@ use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[cfg(windows)]
+mod windows_security;
+
 // Constants
 const AES_KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
@@ -303,13 +306,17 @@ const METADATA_KEY_INFO: &[u8] = b"pqenc-hybrid-metadata-key";
 const AES_KEY_INFO_V3_PREFIX: &[u8] = b"pqenc-pqe3-body-key";
 
 // File permission bits requested at creation, before umask. Not `#[cfg(unix)]`:
-// they are named at call sites that compile on every platform, and the helper
-// that consumes them ignores them off Unix.
+// they are named at call sites that compile on every platform. On Unix the
+// consuming helper applies them via `open()`'s mode; on Windows,
+// OWNER_ONLY_MODE instead gets an explicit owner+SYSTEM DACL applied
+// atomically at creation (see `windows_security::create_owner_only`), while
+// DISTRIBUTABLE_MODE stays unrestricted there too.
 
 /// Owner-only. Used for encrypted output, decrypted plaintext, and the private key.
 const OWNER_ONLY_MODE: u32 = 0o600;
 
-/// Deferred to umask, which is what `File::create` requests. Used for the public
+/// Deferred to umask (Unix) or the parent directory's ACL (Windows), which is
+/// what `File::create`/`CreateFileW` request by default. Used for the public
 /// key, which is *meant* to be handed out — deliberately not `OWNER_ONLY_MODE`.
 const DISTRIBUTABLE_MODE: u32 = 0o666;
 
@@ -557,10 +564,23 @@ fn sync_parent_dir(_path: &str) -> Result<()> {
 /// it must never be replaced by a separate `exists()` check. (An advisory
 /// `exists()` check *in addition to* this claim is fine — see `generate_keys`.)
 ///
-/// `mode` is requested before umask and is ignored on non-Unix platforms.
+/// `mode` is requested before umask on Unix. On Windows, `OWNER_ONLY_MODE`
+/// is enforced via an explicit owner+SYSTEM DACL applied atomically at
+/// creation (see `windows_security::create_owner_only`); `DISTRIBUTABLE_MODE`
+/// is left unrestricted there too, deferring to the parent directory's ACL —
+/// the Windows analogue of deferring to umask.
 ///
 /// Returns `io::Result` so callers can attach their own context message.
 fn create_new_exclusive(path: &str, mode: u32) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        if mode == OWNER_ONLY_MODE {
+            return windows_security::create_owner_only(
+                std::path::Path::new(path),
+                windows_sys::Win32::Storage::FileSystem::CREATE_NEW,
+            );
+        }
+    }
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -1439,9 +1459,11 @@ fn generate_keys(
     // and therefore dropped last, so a late failure removes the public key (the
     // trap) before the private key. Do not reorder these bindings.
     //
-    // Windows note: private-key hardening is unimplemented there. It needs
-    // ACLs; the previous set_readonly(false) call was a no-op on a file that
-    // had just been created and never had the attribute set.
+    // Windows note: hardening happens inside create_new_exclusive, which
+    // OWNER_ONLY_MODE routes to windows_security::create_owner_only — an
+    // explicit owner+SYSTEM DACL applied atomically at creation, not a
+    // post-creation attribute change (which can't retroactively fix an ACL
+    // inherited from the parent directory).
     let mut priv_guard =
         write_new_file_synced(private_key_path, pem_priv.as_bytes(), OWNER_ONLY_MODE)?;
 
@@ -2081,15 +2103,7 @@ fn acquire_output_lock(output_path: &str) -> Result<OutputLockGuard> {
         bail!("Refusing to use {} for locking: it is a symlink", lock_path);
     }
 
-    let mut opts = fs::OpenOptions::new();
-    opts.create(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(OWNER_ONLY_MODE); // only applied if this create() actually creates the file
-    }
-    let file = opts
-        .open(&lock_path)
+    let file = open_lock_file(&lock_path)
         .with_context(|| format!("Failed to open lockfile {}", lock_path))?;
 
     match file.try_lock() {
@@ -2105,6 +2119,36 @@ fn acquire_output_lock(output_path: &str) -> Result<OutputLockGuard> {
             Err(e).with_context(|| format!("Failed to acquire lock on {}", lock_path))
         }
     }
+}
+
+/// Opens (creating if necessary) the sibling lockfile at `lock_path` with
+/// owner-only protection, applied only if this call is the one that
+/// actually creates the file — an already-existing lockfile's permissions
+/// are left as they are.
+#[cfg(unix)]
+fn open_lock_file(lock_path: &str) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .mode(OWNER_ONLY_MODE) // only applied if this create() actually creates the file
+        .open(lock_path)
+}
+
+#[cfg(windows)]
+fn open_lock_file(lock_path: &str) -> std::io::Result<File> {
+    windows_security::create_owner_only(
+        std::path::Path::new(lock_path),
+        windows_sys::Win32::Storage::FileSystem::OPEN_ALWAYS,
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_lock_file(lock_path: &str) -> std::io::Result<File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path)
 }
 
 /// Bundles everything `claim_output_and_temp` reserves for one

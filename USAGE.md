@@ -91,9 +91,12 @@ If you're streaming a `tar` from somewhere pqenc can't read directly -- piped ov
 tar czf - /path/to/data | pqenc encrypt --public-key pub.key - --output backup.tar.gz.pqe
 ```
 
-Encrypted output is written with mode `0600` (owner read/write only). If a backup
-agent running as a different user needs to read it, adjust permissions or ownership
-after encryption.
+Encrypted output is written owner-only: mode `0600` (owner read/write only) on
+Unix, and on Windows an explicit ACL granting access only to the creating
+user and `SYSTEM` (inherited access from the parent directory is blocked).
+The same protection applies to the private key and to decrypted plaintext.
+If a backup agent running as a different user/account needs to read the
+output, adjust permissions/ACLs or ownership after encryption.
 
 Encryption refuses to overwrite an existing output file. Before touching the
 destination, pqenc takes an exclusive OS-level lock (`flock` on Unix,

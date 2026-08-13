@@ -1131,6 +1131,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
 ]
