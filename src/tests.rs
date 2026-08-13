@@ -1166,11 +1166,11 @@ fn build_test_pqe4_file(
     (file_bytes, priv_pem)
 }
 
-// Regression tests for TODO.md #1: claim_output_and_temp must not arm a
-// TempFileGuard on the temp path until create_new_exclusive on that exact
-// path has succeeded -- arming it earlier lets TempFileGuard::Drop delete
-// a file this process never created if that random path happens to
-// collide with something already there (attacker-planted or otherwise).
+// Regression tests: claim_output_and_temp must not arm a TempFileGuard on
+// the temp path until create_new_exclusive on that exact path has
+// succeeded -- arming it earlier lets TempFileGuard::Drop delete a file
+// this process never created if that random path happens to collide with
+// something already there (attacker-planted or otherwise).
 mod claim_output_and_temp_tests {
     use super::*;
     use tempfile::TempDir;
