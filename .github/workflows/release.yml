@@ -15,10 +15,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: aarch64-apple-darwin
 
@@ -33,7 +33,7 @@ jobs:
           shasum -a 256 pqenc-macos-arm64.tar.gz > pqenc-macos-arm64.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-arm64
           path: |
@@ -45,10 +45,10 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: x86_64-apple-darwin
 
@@ -63,7 +63,7 @@ jobs:
           shasum -a 256 pqenc-macos-x86_64.tar.gz > pqenc-macos-x86_64.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-x86_64
           path: |
@@ -75,10 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: x86_64-unknown-linux-musl
 
@@ -98,7 +98,7 @@ jobs:
           sha256sum pqenc-linux-x86_64.tar.gz > pqenc-linux-x86_64.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-x86_64
           path: |
@@ -110,10 +110,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -131,23 +131,51 @@ jobs:
           (Get-FileHash pqenc-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower() + "  pqenc-windows-x86_64.zip" | Out-File -Encoding ASCII pqenc-windows-x86_64.zip.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-x86_64
           path: |
             target/x86_64-pc-windows-msvc/release/pqenc-windows-x86_64.zip
             target/x86_64-pc-windows-msvc/release/pqenc-windows-x86_64.zip.sha256
 
+  security-checks:
+    name: Advisory, license, and source checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: cargo deny (advisories, licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+      - name: cargo audit
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Kept in sync with the documented exception in deny.toml: no fix
+          # is available from pqenc's side (see that file's comment for why).
+          ignore: RUSTSEC-2026-0173
+
   release:
     name: Create Release
-    needs: [build-macos-arm64, build-macos-x86_64, build-linux-x86_64, build-windows-x86_64]
+    needs:
+      [
+        build-macos-arm64,
+        build-macos-x86_64,
+        build-linux-x86_64,
+        build-windows-x86_64,
+        security-checks,
+      ]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
@@ -155,7 +183,7 @@ jobs:
         run: ls -lR artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: artifacts/**/*
           draft: false

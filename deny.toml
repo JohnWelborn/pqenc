@@ -2,6 +2,17 @@
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+ignore = [
+    # proc-macro-error2 is unmaintained (build-time only; transitive via
+    # hax-lib-macros -> hax-lib -> libcrux-ml-kem/libcrux-sha3/etc., part of
+    # the formal-verification tooling for libcrux's ML-KEM implementation).
+    # No fix is available from pqenc's side: libcrux-ml-kem 0.0.10 is
+    # already the newest published release (checked 2026-08-14), and there
+    # is no alternative version to pin. Revisit next time libcrux-ml-kem is
+    # bumped, or if this advisory is upgraded from "unmaintained" to an
+    # actual vulnerability.
+    "RUSTSEC-2026-0173",
+]
 
 [licenses]
 allow = [
