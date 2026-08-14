@@ -775,7 +775,7 @@ fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8
     let key = derive_key_from_passphrase(passphrase, &salt, &params)?;
 
     let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+    let cipher = Aes256Gcm::new(aes_key_from_slice(&key.data));
 
     // Header covers everything the AAD binds: version, algorithm IDs,
     // KDF params, salt, nonce -- but not the ciphertext-length prefix or
@@ -796,7 +796,7 @@ fn encrypt_private_key(composite_key: &[u8], passphrase: &[u8]) -> Result<Vec<u8
 
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            aes_nonce_from_slice(&nonce),
             Payload {
                 msg: composite_key,
                 aad: &aad,
@@ -898,11 +898,11 @@ fn decrypt_private_key(encrypted_blob: &[u8], passphrase: &[u8]) -> Result<Sensi
     aad.extend_from_slice(header);
 
     let key = derive_key_from_passphrase(passphrase, salt, &params)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+    let cipher = Aes256Gcm::new(aes_key_from_slice(&key.data));
 
     let plaintext = cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            aes_nonce_from_slice(nonce),
             Payload {
                 msg: ciphertext,
                 aad: &aad,
@@ -1555,6 +1555,25 @@ fn derive_body_key_v3(
 
 use aes_gcm::aead::consts::U12;
 
+/// Converts a byte slice to an AES-256-GCM key reference. `data` must be
+/// exactly `AES_KEY_SIZE` (32) bytes -- true for every caller in this file,
+/// all of which derive keys via HKDF or Argon2 with a fixed 32-byte output.
+/// `Key::from_slice` (the prior API) is deprecated as of aes-gcm 0.11 in
+/// favor of `TryFrom`.
+fn aes_key_from_slice(data: &[u8]) -> &Key<Aes256Gcm> {
+    data.try_into()
+        .expect("AES-256-GCM key must be exactly 32 bytes")
+}
+
+/// Converts a byte slice to an AES-GCM nonce reference. `data` must be
+/// exactly `NONCE_SIZE`/`PBE_NONCE_SIZE` (12) bytes -- true for every caller
+/// in this file. `Nonce::from_slice` (the prior API) is deprecated as of
+/// aes-gcm 0.11 in favor of `TryFrom`.
+fn aes_nonce_from_slice(data: &[u8]) -> &Nonce<U12> {
+    data.try_into()
+        .expect("AES-GCM nonce must be exactly 12 bytes")
+}
+
 /// Derives a nonce by adding a counter to a base nonce.
 ///
 /// Converts the 12-byte base nonce to a u128, adds the counter,
@@ -1592,7 +1611,7 @@ fn get_nonce(base_nonce: &[u8], counter: u64) -> Result<Nonce<U12>> {
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes.copy_from_slice(&bytes[4..16]);
 
-    Ok(*Nonce::from_slice(&nonce_bytes))
+    Ok(*aes_nonce_from_slice(&nonce_bytes))
 }
 
 /// Builds Additional Authenticated Data for a body chunk, for either format
@@ -2454,7 +2473,7 @@ impl BodyCipherProvider {
         if needs_new_key {
             let key =
                 derive_body_key_v3(&self.combined_secret.data, &self.salt[..], segment_index)?;
-            let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+            let cipher = Aes256Gcm::new(aes_key_from_slice(&key.data));
             self.cached_segment = Some((segment_index, cipher));
             // `key` (SensitiveData) drops here and zeroizes its raw bytes --
             // the AES round-key schedule already expanded into `cipher` no
@@ -2475,21 +2494,26 @@ impl BodyCipherProvider {
 }
 
 /// Concatenates the ML-KEM and X25519 shared secrets into a single 64-byte
-/// `SensitiveData`, zeroizing the X25519 half in place once copied. Shared by
-/// `encrypt_file_with_segment_size` and `decrypt_file_with_segment_size` so
-/// this has exactly one implementation. Takes both secrets by reference
-/// rather than by value: `kem_secret`'s own `ZeroizeOnDrop` still fires in
-/// the caller as usual, and `x25519_secret.zeroize()` runs on the caller's
-/// actual variable via `&mut` -- no extra copy of either secret is created
-/// here for zeroizing to miss.
+/// `SensitiveData`, wiping the X25519 half immediately once copied. Shared
+/// by `encrypt_file_with_segment_size` and `decrypt_file_with_segment_size`
+/// so this has exactly one implementation. `kem_secret` is taken by
+/// reference -- its own `ZeroizeOnDrop` still fires in the caller as usual.
+/// `x25519_secret` is taken *by value* and explicitly dropped the instant
+/// its bytes are copied out, rather than left for the caller's own scope to
+/// eventually drop it: as of x25519-dalek 3.0, `SharedSecret` no longer
+/// implements `Zeroize` (only `ZeroizeOnDrop`), so an explicit `.zeroize()`
+/// call is no longer available -- `drop()` triggers the same
+/// `ZeroizeOnDrop` wipe synchronously, at this exact point, preserving the
+/// original eager-wipe timing rather than deferring it to the end of the
+/// caller's function.
 fn combine_secrets(
     kem_secret: &SensitiveData,
-    x25519_secret: &mut x25519_dalek::SharedSecret,
+    x25519_secret: x25519_dalek::SharedSecret,
 ) -> SensitiveData {
     let mut combined = Vec::with_capacity(SHARED_SECRET_SIZE);
     combined.extend_from_slice(kem_secret.data.as_slice());
     combined.extend_from_slice(x25519_secret.as_bytes());
-    x25519_secret.zeroize();
+    drop(x25519_secret);
     SensitiveData::new(combined)
 }
 
@@ -2602,7 +2626,7 @@ fn encrypt_file_with_segment_size(
     let ephemeral_secret = EphemeralSecret::random();
     let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
     let recipient_public = X25519PublicKey::from(x25519_pk);
-    let mut shared_secret_x25519 = ephemeral_secret.diffie_hellman(&recipient_public);
+    let shared_secret_x25519 = ephemeral_secret.diffie_hellman(&recipient_public);
 
     if shared_secret_x25519.as_bytes() == &[0u8; 32] {
         bail!("X25519 key exchange failed: invalid public key (low-order point detected)");
@@ -2613,7 +2637,7 @@ fn encrypt_file_with_segment_size(
     // ever moved into BodyCipherProvider -- zeroizes it via ZeroizeOnDrop,
     // rather than relying on a manual `.zeroize()` call that only ran on a
     // specific success path.
-    let combined_secret = combine_secrets(&kem_secret_guard, &mut shared_secret_x25519);
+    let combined_secret = combine_secrets(&kem_secret_guard, shared_secret_x25519);
 
     let mut salt = [0u8; SALT_SIZE];
     rand::rng().fill_bytes(&mut salt);
@@ -3317,7 +3341,7 @@ fn decrypt_file_with_segment_size(
     let x25519_private = StaticSecret::from(x25519_sk_array);
     x25519_sk_array.zeroize();
     let ephemeral_public = X25519PublicKey::from(ephemeral_x25519_pk);
-    let mut shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
+    let shared_secret_x25519 = x25519_private.diffie_hellman(&ephemeral_public);
 
     if shared_secret_x25519.as_bytes() == &[0u8; 32] {
         bail!(
@@ -3329,7 +3353,7 @@ fn decrypt_file_with_segment_size(
     // path below -- including a `?` early return -- zeroizes it via
     // ZeroizeOnDrop, rather than relying on a manual `.zeroize()` call that
     // only ran on a specific success path.
-    let combined_secret = combine_secrets(&kem_secret_guard, &mut shared_secret_x25519);
+    let combined_secret = combine_secrets(&kem_secret_guard, shared_secret_x25519);
 
     // combined_secret moves in here -- needed both to derive each segment's
     // key lazily as the chunk loop below reaches it, and (PQE3 only) to
@@ -3361,11 +3385,11 @@ fn decrypt_file_with_segment_size(
             FileFormat::V3 => {
                 let metadata_key = derive_metadata_key(&body_provider.combined_secret.data, &salt)?;
                 let metadata_cipher =
-                    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+                    Aes256Gcm::new(aes_key_from_slice(&metadata_key.data));
                 let metadata_aad = build_metadata_aad(&prefix_hash);
                 let mut metadata_plaintext = metadata_cipher
                     .decrypt(
-                        Nonce::from_slice(&base_nonce),
+                        aes_nonce_from_slice(&base_nonce),
                         Payload {
                             msg: metadata_ciphertext.as_slice(),
                             aad: &metadata_aad,

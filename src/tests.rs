@@ -249,7 +249,7 @@ fn build_v1_key_envelope(
     let salt: [u8; ARGON2_SALT_SIZE] = rand::rng().random();
     let key = derive_key_from_passphrase(passphrase, &salt, params).unwrap();
     let nonce: [u8; PBE_NONCE_SIZE] = rand::rng().random();
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.data));
+    let cipher = Aes256Gcm::new(aes_key_from_slice(&key.data));
 
     let mut header = Vec::new();
     header.push(KEY_ENVELOPE_VERSION_V1);
@@ -267,7 +267,7 @@ fn build_v1_key_envelope(
 
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            aes_nonce_from_slice(&nonce),
             Payload {
                 msg: composite_key,
                 aad: &aad,
@@ -1008,12 +1008,12 @@ fn build_test_pqe3_file(
     header.extend_from_slice(&extension_region);
 
     let metadata_key = derive_metadata_key(&combined_secret, &salt).unwrap();
-    let metadata_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&metadata_key.data));
+    let metadata_cipher = Aes256Gcm::new(aes_key_from_slice(&metadata_key.data));
     let metadata_plaintext = encode_tlv_fields(metadata_fields);
     let metadata_aad = build_metadata_aad(&prefix_hash);
     let metadata_ciphertext = metadata_cipher
         .encrypt(
-            Nonce::from_slice(&base_nonce),
+            aes_nonce_from_slice(&base_nonce),
             Payload {
                 msg: metadata_plaintext.as_slice(),
                 aad: &metadata_aad,
@@ -1026,7 +1026,7 @@ fn build_test_pqe3_file(
     let header_hash: [u8; 32] = Sha256::digest(&header).into();
 
     let body_key = derive_body_key_v3(&combined_secret, &salt, 0).unwrap();
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&body_key.data));
+    let cipher = Aes256Gcm::new(aes_key_from_slice(&body_key.data));
 
     let mut file_bytes = header;
     let chunks: Vec<&[u8]> = if plaintext.is_empty() {
@@ -1146,7 +1146,7 @@ fn build_test_pqe4_file(
     full_plaintext.extend_from_slice(plaintext);
 
     let body_key = derive_body_key_v3(&combined_secret, &salt, 0).unwrap();
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&body_key.data));
+    let cipher = Aes256Gcm::new(aes_key_from_slice(&body_key.data));
 
     let mut file_bytes = header;
     // full_plaintext is never empty (always >= 4 bytes for the length
