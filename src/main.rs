@@ -392,6 +392,7 @@ const PEM_PRIV_END: &str = "-----END PQENC PRIVATE KEY-----";
     name = "pqenc",
     about = "Post-Quantum File Encryption Tool (ML-KEM-1024 + X25519 hybrid + AES-256-GCM)",
     long_about = None,
+    version,
     subcommand_required = true,
     arg_required_else_help = true,
     after_help = "\
