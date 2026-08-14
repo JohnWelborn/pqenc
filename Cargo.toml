@@ -1,6 +1,6 @@
 [package]
 name = "pqenc"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Post-quantum encryption tool using ML-KEM-1024 (FIPS 203) and AES-256-GCM"
