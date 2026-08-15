@@ -423,12 +423,8 @@ Examples:
   # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.pqe
 
-  # Show the default key's fingerprint and randomart
+  # Show the default keys' fingerprints and randomart
   pqenc fingerprint
-
-  # Show a specific key's fingerprint and randomart
-  pqenc fingerprint pub.key
-  pqenc fingerprint priv.key
 "
 )]
 struct Cli {
@@ -511,11 +507,20 @@ enum Commands {
         #[arg(help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
         input: String,
     },
-    #[command(about = "Show a key's fingerprint and randomart")]
+    #[command(about = "Show a public and/or private key's fingerprint and randomart")]
     Fingerprint {
-        #[arg(help = "Public or private key file to fingerprint (auto-detected). \
-            Default: ~/.pqenc/pub.key, falling back to ~/.pqenc/priv.key.")]
-        key: Option<String>,
+        #[arg(
+            long,
+            short = 'p',
+            help = "Public key to fingerprint (default: ~/.pqenc/pub.key, unless --private-key is given)"
+        )]
+        public_key: Option<String>,
+        #[arg(
+            long,
+            short = 's',
+            help = "Private key to fingerprint (default: ~/.pqenc/priv.key, unless --public-key is given)"
+        )]
+        private_key: Option<String>,
         #[arg(
             long,
             help = "Passphrase for the private key, skipping the interactive prompt. \
@@ -1448,26 +1453,30 @@ fn resolve_existing_key_path(
     Ok(path.display().to_string())
 }
 
-/// Resolves the key path for `fingerprint`: an explicit value wins as-is;
-/// otherwise tries `~/.pqenc/pub.key` (never needs a passphrase, so it's the
-/// faster default) and falls back to `~/.pqenc/priv.key`.
-fn resolve_fingerprint_key_path(explicit: Option<String>) -> Result<String> {
-    if let Some(path) = explicit {
-        return Ok(path);
+/// Resolves fingerprint's key set. If either `--public-key`/`--private-key`
+/// was given explicitly, both are returned exactly as given -- explicit
+/// usage of either flag disables default-filling for both, so an
+/// explicitly-named key is never silently paired with an unrelated key that
+/// happens to live at the default location. If neither was given, resolves
+/// to whichever of `~/.pqenc/pub.key`/`priv.key` exist, skipping any that
+/// don't, and erroring only if neither does.
+fn resolve_fingerprint_keys(
+    public_key: Option<String>,
+    private_key: Option<String>,
+) -> Result<(Option<String>, Option<String>)> {
+    if public_key.is_some() || private_key.is_some() {
+        return Ok((public_key, private_key));
     }
     let pub_path = default_key_path(DEFAULT_PUB_KEY_FILENAME)?;
-    if pub_path.exists() {
-        return Ok(pub_path.display().to_string());
-    }
     let priv_path = default_key_path(DEFAULT_PRIV_KEY_FILENAME)?;
-    if priv_path.exists() {
-        return Ok(priv_path.display().to_string());
+    let public_key = pub_path.exists().then(|| pub_path.display().to_string());
+    let private_key = priv_path.exists().then(|| priv_path.display().to_string());
+    if public_key.is_none() && private_key.is_none() {
+        bail!(
+            "No default keys found in ~/.pqenc/. Pass --public-key/--private-key or run `pqenc generate-keys`."
+        );
     }
-    bail!(
-        "No key specified and none found at {} or {}. Pass a key path or run `pqenc generate-keys`.",
-        pub_path.display(),
-        priv_path.display()
-    );
+    Ok((public_key, private_key))
 }
 
 fn run() -> Result<()> {
@@ -1514,9 +1523,30 @@ fn run() -> Result<()> {
         Commands::Verify { input } => {
             verify_file(&input)?;
         }
-        Commands::Fingerprint { key, passphrase } => {
-            let key = resolve_fingerprint_key_path(key)?;
-            show_fingerprint(key, passphrase)?;
+        Commands::Fingerprint {
+            public_key,
+            private_key,
+            passphrase,
+        } => {
+            let (public_key, private_key) = resolve_fingerprint_keys(public_key, private_key)?;
+            // The passphrase is only ever consumed by whichever call turns
+            // out to be the private key, so when both are selected, the
+            // public-key call gets `None` rather than a clone -- avoids
+            // leaving an unwiped copy of the secret behind when the private
+            // key isn't selected (that call, and thus its zeroize, would
+            // never run) and avoids cloning it at all otherwise.
+            match (public_key, private_key) {
+                (Some(pk), Some(sk)) => {
+                    show_fingerprint(pk, None)?;
+                    show_fingerprint(sk, passphrase)?;
+                }
+                (Some(key), None) | (None, Some(key)) => {
+                    show_fingerprint(key, passphrase)?;
+                }
+                (None, None) => {
+                    unreachable!("resolve_fingerprint_keys guarantees at least one key")
+                }
+            }
         }
     }
 

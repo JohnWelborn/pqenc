@@ -66,11 +66,13 @@ sender — anyone holding your public key can embed any filename they like.
 the restored name as attacker-independent information.)
 This restore drill is the most thorough check, but not the only one:
 `pqenc encrypt` also prints the recipient key's fingerprint on every run, and
-`pqenc fingerprint pub.key` / `pqenc fingerprint priv.key` print it on
-demand for either half of a keypair. Run it on both
-machines after distributing a key and compare the `SHA256:...` line (or the
-randomart) by eye — a mismatch here means `pub.key` and `priv.key` do not
-belong together, likely because keys were regenerated and only one file was
+`pqenc fingerprint --public-key pub.key` / `pqenc fingerprint --private-key
+priv.key` print it on demand for either half of a keypair — or, if both are
+at the default location, a bare `pqenc fingerprint` prints both at once.
+Run it on both machines after distributing a key and compare the
+`SHA256:...` line (or the randomart) by eye — a mismatch here means
+`pub.key` and `priv.key` do not belong together, likely because keys were
+regenerated and only one file was
 copied, or the wrong file was grabbed. Without one of these checks, a mismatch
 surfaces only when you try to restore, which may be months later. Repeat
 whichever check you use whenever you replace or move either key file.

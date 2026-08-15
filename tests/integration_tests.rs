@@ -1429,6 +1429,13 @@ fn extract_sha256_fingerprint(output: &str) -> &str {
     output[start..].split_whitespace().next().unwrap()
 }
 
+fn extract_all_sha256_fingerprints(output: &str) -> Vec<&str> {
+    output
+        .match_indices("SHA256:")
+        .map(|(start, _)| output[start..].split_whitespace().next().unwrap())
+        .collect()
+}
+
 #[test]
 fn test_generate_keys_prints_fingerprint_and_randomart() {
     let env = TempTestEnv::new();
@@ -1471,7 +1478,7 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
     let from_pub = Command::new(pqenc_binary())
-        .args(["fingerprint", pub_key.to_str().unwrap()])
+        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(from_pub.status.success());
@@ -1480,6 +1487,7 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
     let from_priv = Command::new(pqenc_binary())
         .args([
             "fingerprint",
+            "--private-key",
             priv_key.to_str().unwrap(),
             "--passphrase",
             TEST_PASSPHRASE,
@@ -1500,22 +1508,17 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
 }
 
 #[test]
-fn test_fingerprint_rejects_extra_argument() {
-    // fingerprint takes at most one positional (it's now optional, defaulting
-    // to ~/.pqenc -- see the default-key-location tests below); two is still
-    // a clap parse error.
+fn test_fingerprint_rejects_positional_argument() {
+    // fingerprint no longer takes a positional at all -- it's --public-key/
+    // --private-key only (see the default-key-location tests below).
     let env = TempTestEnv::new();
-    let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
-    let both = Command::new(pqenc_binary())
-        .args([
-            "fingerprint",
-            pub_key.to_str().unwrap(),
-            priv_key.to_str().unwrap(),
-        ])
+    let output = Command::new(pqenc_binary())
+        .args(["fingerprint", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!both.status.success());
+    assert!(!output.status.success());
 }
 
 #[test]
@@ -1524,7 +1527,7 @@ fn test_fingerprint_rejects_file_that_is_neither_key_type() {
     let not_a_key = env.create_file("not_a_key.txt", b"this is not a pqenc key file");
 
     let output = Command::new(pqenc_binary())
-        .args(["fingerprint", not_a_key.to_str().unwrap()])
+        .args(["fingerprint", "--public-key", not_a_key.to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -1571,7 +1574,7 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
     );
 
     let fingerprint_output = Command::new(pqenc_binary())
-        .args(["fingerprint", pub_key.to_str().unwrap()])
+        .args(["fingerprint", "--public-key", pub_key.to_str().unwrap()])
         .output()
         .unwrap();
     let fingerprint_stdout = String::from_utf8_lossy(&fingerprint_output.stdout).into_owned();
@@ -1957,12 +1960,13 @@ fn test_decrypt_missing_default_private_key_errors() {
 }
 
 #[test]
-fn test_fingerprint_defaults_prefers_public_key() {
+fn test_fingerprint_defaults_prints_both_keys_when_present() {
     let home = TempDir::new().unwrap();
     let mut gen_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut gen_cmd, home.path());
+    // Empty passphrase: plain-text private key, so nothing can prompt here.
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args(["generate-keys", "--passphrase", ""])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -1974,13 +1978,26 @@ fn test_fingerprint_defaults_prefers_public_key() {
     assert!(output.status.success(), "stderr: {}", stderr);
     assert!(
         !stderr.contains("Enter passphrase for"),
-        "fingerprint should default to the public key, which never needs a passphrase; stderr: {}",
+        "neither key should need a passphrase here; stderr: {}",
         stderr
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fingerprints = extract_all_sha256_fingerprints(&stdout);
+    assert_eq!(
+        fingerprints.len(),
+        2,
+        "bare fingerprint should print both default keys; stdout: {}",
+        stdout
+    );
+    assert_eq!(
+        fingerprints[0], fingerprints[1],
+        "public and private halves of the same keypair must report the same fingerprint"
     );
 }
 
 #[test]
-fn test_fingerprint_falls_back_to_private_key() {
+fn test_fingerprint_defaults_skips_missing_public_key() {
     let home = TempDir::new().unwrap();
     let pqenc_dir = home.path().join(".pqenc");
     fs::create_dir_all(&pqenc_dir).unwrap();
@@ -1992,7 +2009,7 @@ fn test_fingerprint_falls_back_to_private_key() {
 
     // Generate a plain-text (no passphrase) keypair elsewhere, then copy only
     // the private key into the default dir, so pub.key is absent there and
-    // the resolver must fall back to priv.key.
+    // the resolver must skip it rather than error.
     let env = TempTestEnv::new();
     let (_, priv_key) = env.generate_keys_with_passphrase("");
     fs::copy(&priv_key, pqenc_dir.join("priv.key")).unwrap();
@@ -2005,6 +2022,8 @@ fn test_fingerprint_falls_back_to_private_key() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(extract_all_sha256_fingerprints(&stdout).len(), 1);
 }
 
 #[test]
@@ -2016,8 +2035,101 @@ fn test_fingerprint_missing_default_key_errors() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("pub.key"), "stderr: {}", stderr);
-    assert!(stderr.contains("priv.key"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("No default keys found in ~/.pqenc/"),
+        "stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_fingerprint_explicit_flag_disables_defaulting() {
+    let home = TempDir::new().unwrap();
+    let mut gen_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut gen_cmd, home.path());
+    let gen_output = gen_cmd
+        .args(["generate-keys", "--passphrase", ""])
+        .output()
+        .unwrap();
+    assert!(gen_output.status.success());
+
+    // A second, unrelated keypair, elsewhere.
+    let env = TempTestEnv::new();
+    let (_, other_priv_key) = env.generate_keys_with_passphrase("");
+
+    let mut fp_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut fp_cmd, home.path());
+    let output = fp_cmd
+        .args([
+            "fingerprint",
+            "--private-key",
+            other_priv_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        extract_all_sha256_fingerprints(&stdout).len(),
+        1,
+        "explicit --private-key must not also pull in the default public key; stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(other_priv_key.to_str().unwrap()),
+        "stdout: {}",
+        stdout
+    );
+    let default_pub_key = home.path().join(".pqenc").join("pub.key");
+    assert!(
+        !stdout.contains(default_pub_key.to_str().unwrap()),
+        "stdout should not mention the default public key: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_fingerprint_defaults_uses_supplied_passphrase_for_private_key() {
+    let home = TempDir::new().unwrap();
+    let mut gen_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut gen_cmd, home.path());
+    let gen_output = gen_cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(gen_output.status.success());
+
+    let mut fp_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut fp_cmd, home.path());
+    let output = fp_cmd
+        .args(["fingerprint", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {}", stderr);
+    assert!(
+        !stderr.contains("Enter passphrase for"),
+        "the supplied --passphrase should avoid an interactive prompt; stderr: {}",
+        stderr
+    );
+    // The public-key call never receives the passphrase at all when both
+    // keys are selected (it's only ever meaningful for the private half),
+    // so there's nothing for it to note or ignore.
+    assert!(
+        !stderr.contains("ignoring supplied passphrase"),
+        "the public-key half shouldn't have been given a passphrase to ignore; stderr: {}",
+        stderr
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fingerprints = extract_all_sha256_fingerprints(&stdout);
+    assert_eq!(fingerprints.len(), 2, "stdout: {}", stdout);
+    assert_eq!(fingerprints[0], fingerprints[1]);
 }
 
 #[test]
