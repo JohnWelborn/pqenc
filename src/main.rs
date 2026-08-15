@@ -597,20 +597,43 @@ fn sync_parent_dir(_path: &str) -> Result<()> {
 /// login, and (deliberately) not a higher-level crate: this lets tests
 /// exercise default-path resolution by setting that one variable on a
 /// child process, with no shared mutable state to coordinate.
+// `home_dir` converts through `OsString::into_string` rather than going
+// straight to `PathBuf::from`, deliberately rejecting a non-UTF-8 $HOME/
+// %USERPROFILE% instead of silently carrying the raw bytes forward: every
+// downstream default-path helper only ever joins ASCII literals onto this
+// result and then renders it back to a `String` via `.display()` (matching
+// how every other path in this codebase is represented) -- if the bytes
+// aren't valid UTF-8 to begin with, that render is lossy, and a resolver
+// would then hand callers a path that doesn't match whatever was actually
+// created/checked on disk. Failing here means that mismatch can't happen.
 #[cfg(unix)]
 fn home_dir() -> Result<std::path::PathBuf> {
-    std::env::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
+        .context("Cannot determine home directory: $HOME is not set")?;
+    home.into_string()
         .map(std::path::PathBuf::from)
-        .context("Cannot determine home directory: $HOME is not set")
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Cannot use the default key location: $HOME is not valid UTF-8. \
+             Pass --public-key/--private-key explicitly instead."
+            )
+        })
 }
 
 #[cfg(windows)]
 fn home_dir() -> Result<std::path::PathBuf> {
-    std::env::var_os("USERPROFILE")
+    let home = std::env::var_os("USERPROFILE")
         .filter(|v| !v.is_empty())
+        .context("Cannot determine home directory: %USERPROFILE% is not set")?;
+    home.into_string()
         .map(std::path::PathBuf::from)
-        .context("Cannot determine home directory: %USERPROFILE% is not set")
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Cannot use the default key location: %USERPROFILE% is not valid UTF-8. \
+             Pass --public-key/--private-key explicitly instead."
+            )
+        })
 }
 
 /// The default key directory, `~/.pqenc`.

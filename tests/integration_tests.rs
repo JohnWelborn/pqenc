@@ -2051,3 +2051,27 @@ fn test_explicit_key_flags_never_touch_default_location() {
     assert!(env.file_path("explicit_pub.key").is_file());
     assert!(env.file_path("explicit_priv.key").is_file());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_generate_keys_rejects_non_utf8_home() {
+    use std::os::unix::ffi::OsStringExt;
+
+    // A lone 0xFF byte is never valid UTF-8 in any position, so `HOME` fails
+    // to convert regardless of what else surrounds it.
+    let bogus_home = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, std::path::Path::new(&bogus_home));
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "must refuse a non-UTF-8 $HOME rather than silently using a corrupted path"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not valid UTF-8"), "stderr: {}", stderr);
+}
