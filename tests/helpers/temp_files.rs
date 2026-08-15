@@ -14,6 +14,21 @@ pub fn set_fake_home(cmd: &mut Command, home: &Path) {
     cmd.env("HOME", home).env("USERPROFILE", home);
 }
 
+/// Writes `passphrase` to `dir/passphrase.txt`, sets owner-only permissions
+/// on Unix (pqenc's `--passphrase-file` refuses a group/world-readable
+/// file), and returns the path.
+#[allow(dead_code)]
+pub fn write_passphrase_file(dir: &Path, passphrase: &str) -> PathBuf {
+    let path = dir.join("passphrase.txt");
+    fs::write(&path, passphrase).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
 pub struct TempTestEnv {
     _dir: TempDir,
     pub_key_path: PathBuf,
@@ -44,8 +59,15 @@ impl TempTestEnv {
         path
     }
 
+    /// Writes `passphrase` to a `--passphrase-file`-ready file inside this
+    /// env's own temp dir and returns its path.
+    pub fn passphrase_file(&self, passphrase: &str) -> PathBuf {
+        write_passphrase_file(self._dir.path(), passphrase)
+    }
+
     pub fn generate_keys_with_passphrase(&self, passphrase: &str) -> (PathBuf, PathBuf) {
         let binary = env!("CARGO_BIN_EXE_pqenc");
+        let passphrase_file = write_passphrase_file(self._dir.path(), passphrase);
 
         let output = Command::new(binary)
             .args([
@@ -54,8 +76,8 @@ impl TempTestEnv {
                 self.pub_key_path.to_str().unwrap(),
                 "--private-key",
                 self.priv_key_path.to_str().unwrap(),
-                "--passphrase",
-                passphrase,
+                "--passphrase-file",
+                passphrase_file.to_str().unwrap(),
             ])
             .output()
             .expect("Failed to generate keys");
@@ -77,6 +99,7 @@ impl TempTestEnv {
         passphrase: &str,
     ) -> Result<(), String> {
         let binary = env!("CARGO_BIN_EXE_pqenc");
+        let passphrase_file = write_passphrase_file(self._dir.path(), passphrase);
 
         let result = Command::new(binary)
             .args([
@@ -86,8 +109,8 @@ impl TempTestEnv {
                 output,
                 "--private-key",
                 self.priv_key_path.to_str().unwrap(),
-                "--passphrase",
-                passphrase,
+                "--passphrase-file",
+                passphrase_file.to_str().unwrap(),
             ])
             .output()
             .map_err(|e| format!("Failed to run decrypt: {}", e))?;

@@ -257,8 +257,8 @@ fn test_encrypt_directory_native_default_output_roundtrip() {
             expected_encrypted_path.to_str().unwrap(),
             "--private-key",
             private_key_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .expect("Failed to run pqenc decrypt");
@@ -325,8 +325,8 @@ fn test_encrypt_directory_native_explicit_output_keeps_embedded_name() {
             custom_encrypted_path.to_str().unwrap(),
             "--private-key",
             private_key_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .expect("Failed to run pqenc decrypt");

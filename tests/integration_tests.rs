@@ -1,7 +1,8 @@
 mod helpers;
-use helpers::{set_fake_home, TempTestEnv, TestData, TEST_PASSPHRASE};
+use helpers::{set_fake_home, write_passphrase_file, TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 fn pqenc_binary() -> String {
@@ -356,9 +357,9 @@ fn test_generate_keys_empty_passphrase_stores_unencrypted() {
         .unwrap();
     assert!(output.status.success());
 
-    // No --passphrase and stdin closed: decrypt must not reach a passphrase
-    // prompt at all for a plain-text key, or this would hang/fail on a
-    // closed-stdin read instead of succeeding.
+    // No --passphrase-file and stdin closed: decrypt must not reach a
+    // passphrase prompt at all for a plain-text key, or this would
+    // hang/fail on a closed-stdin read instead of succeeding.
     let output = Command::new(pqenc_binary())
         .args([
             "decrypt",
@@ -412,8 +413,10 @@ fn test_decrypt_unencrypted_key_ignores_supplied_passphrase() {
             decrypted_path.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            "some-unrelated-value",
+            "--passphrase-file",
+            env.passphrase_file("some-unrelated-value")
+                .to_str()
+                .unwrap(),
         ])
         .output()
         .unwrap();
@@ -494,8 +497,8 @@ fn test_optional_output_defaults_round_trip() {
             expected_encrypted_path.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -556,8 +559,8 @@ fn test_decrypt_restores_original_mtime() {
             decrypted_path.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1158,6 +1161,7 @@ fn run_generate_keys_answering_prompts(
     pub_path: &std::path::Path,
     priv_path: &std::path::Path,
 ) -> std::process::Output {
+    let passphrase_file = write_passphrase_file(pub_path.parent().unwrap(), TEST_PASSPHRASE);
     Command::new(pqenc_binary())
         .args([
             "generate-keys",
@@ -1165,8 +1169,8 @@ fn run_generate_keys_answering_prompts(
             pub_path.to_str().unwrap(),
             "--private-key",
             priv_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            passphrase_file.to_str().unwrap(),
         ])
         .output()
         .unwrap()
@@ -1327,8 +1331,8 @@ fn test_generate_keys_key_file_permissions() {
             pub_path.to_str().unwrap(),
             "--private-key",
             priv_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1368,8 +1372,8 @@ fn test_generate_keys_key_file_permissions_windows() {
             pub_path.to_str().unwrap(),
             "--private-key",
             priv_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1449,8 +1453,8 @@ fn test_generate_keys_prints_fingerprint_and_randomart() {
             pub_key.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1489,8 +1493,8 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
             "fingerprint",
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1600,7 +1604,13 @@ fn test_generate_keys_defaults_to_pqenc_dir() {
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, home.path());
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(
@@ -1627,7 +1637,13 @@ fn test_generate_keys_default_dir_and_keys_have_owner_only_permissions() {
     cmd.arg("-c")
         .arg(r#"umask 022; exec "$0" "$@""#)
         .arg(pqenc_binary())
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE]);
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ]);
     set_fake_home(&mut cmd, home.path());
     let output = cmd.output().unwrap();
     assert!(
@@ -1665,7 +1681,13 @@ fn test_generate_keys_default_dir_and_keys_have_owner_only_permissions_windows()
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, home.path());
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(
@@ -1710,7 +1732,13 @@ fn test_generate_keys_refuses_occupied_default_path() {
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, home.path());
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -1742,7 +1770,13 @@ fn test_generate_keys_reuses_existing_default_dir() {
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, home.path());
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(
@@ -1767,7 +1801,13 @@ fn test_generate_keys_refuses_insecure_existing_default_dir() {
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, home.path());
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -1791,7 +1831,13 @@ fn test_encrypt_defaults_to_pqenc_public_key() {
     let mut gen_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut gen_cmd, home.path());
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -1830,8 +1876,10 @@ fn test_encrypt_defaults_to_pqenc_public_key() {
             decrypted_path.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            write_passphrase_file(work_dir.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
         ])
         .output()
         .unwrap();
@@ -1872,7 +1920,13 @@ fn test_decrypt_defaults_to_pqenc_private_key() {
     let mut gen_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut gen_cmd, home.path());
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -1904,8 +1958,10 @@ fn test_decrypt_defaults_to_pqenc_private_key() {
             encrypted_path.to_str().unwrap(),
             "--output",
             decrypted_path.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            write_passphrase_file(work_dir.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
         ])
         .output()
         .unwrap();
@@ -1966,7 +2022,11 @@ fn test_fingerprint_defaults_prints_both_keys_when_present() {
     set_fake_home(&mut gen_cmd, home.path());
     // Empty passphrase: plain-text private key, so nothing can prompt here.
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", ""])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), "").to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -2048,7 +2108,11 @@ fn test_fingerprint_explicit_flag_disables_defaulting() {
     let mut gen_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut gen_cmd, home.path());
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", ""])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), "").to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -2099,7 +2163,13 @@ fn test_fingerprint_defaults_uses_supplied_passphrase_for_private_key() {
     let mut gen_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut gen_cmd, home.path());
     let gen_output = gen_cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(gen_output.status.success());
@@ -2107,14 +2177,20 @@ fn test_fingerprint_defaults_uses_supplied_passphrase_for_private_key() {
     let mut fp_cmd = Command::new(pqenc_binary());
     set_fake_home(&mut fp_cmd, home.path());
     let output = fp_cmd
-        .args(["fingerprint", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "fingerprint",
+            "--passphrase-file",
+            write_passphrase_file(home.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {}", stderr);
     assert!(
         !stderr.contains("Enter passphrase for"),
-        "the supplied --passphrase should avoid an interactive prompt; stderr: {}",
+        "the supplied --passphrase-file should avoid an interactive prompt; stderr: {}",
         stderr
     );
     // The public-key call never receives the passphrase at all when both
@@ -2149,8 +2225,8 @@ fn test_explicit_key_flags_never_touch_default_location() {
             env.file_path("explicit_pub.key").to_str().unwrap(),
             "--private-key",
             env.file_path("explicit_priv.key").to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -2172,11 +2248,21 @@ fn test_generate_keys_rejects_non_utf8_home() {
     // A lone 0xFF byte is never valid UTF-8 in any position, so `HOME` fails
     // to convert regardless of what else surrounds it.
     let bogus_home = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+    // Unrelated to `bogus_home` -- just a real place to put a passphrase
+    // file, in case key-path resolution order ever changes and this
+    // actually gets read.
+    let real_dir = TempDir::new().unwrap();
 
     let mut cmd = Command::new(pqenc_binary());
     set_fake_home(&mut cmd, std::path::Path::new(&bogus_home));
     let output = cmd
-        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .args([
+            "generate-keys",
+            "--passphrase-file",
+            write_passphrase_file(real_dir.path(), TEST_PASSPHRASE)
+                .to_str()
+                .unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -2186,4 +2272,379 @@ fn test_generate_keys_rejects_non_utf8_home() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not valid UTF-8"), "stderr: {}", stderr);
+}
+
+// ---------------------------------------------------------------------
+// --passphrase-file (replaced --passphrase)
+// ---------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn test_passphrase_file_rejects_group_readable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TempTestEnv::new();
+    let passphrase_path = env.file_path("leaky_passphrase.txt");
+    fs::write(&passphrase_path, TEST_PASSPHRASE).unwrap();
+    fs::set_permissions(&passphrase_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            env.file_path("leaky_pub.key").to_str().unwrap(),
+            "--private-key",
+            env.file_path("leaky_priv.key").to_str().unwrap(),
+            "--passphrase-file",
+            passphrase_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "must refuse a group/world-readable passphrase file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("owner-only"), "stderr: {}", stderr);
+    assert!(!env.file_path("leaky_pub.key").exists());
+    assert!(!env.file_path("leaky_priv.key").exists());
+}
+
+#[test]
+fn test_passphrase_file_dev_null_is_exempt_from_permission_check() {
+    let env = TempTestEnv::new();
+    let pub_key = env.file_path("null_pub.key");
+    let priv_key = env.file_path("null_priv.key");
+
+    // Windows has no /dev/null, and no permission check to exempt it from in
+    // the first place -- NUL just naturally reads as empty either way.
+    let devnull = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let output = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            devnull,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("stored in plain text"),
+        "stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_passphrase_file_supports_stdin() {
+    let env = TempTestEnv::new();
+    let pub_key = env.file_path("stdin_pub.key");
+    let priv_key = env.file_path("stdin_priv.key");
+
+    let mut child = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(TEST_PASSPHRASE.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Confirm the key really was encrypted with TEST_PASSPHRASE by round
+    // tripping through it.
+    let input_path = env.create_file("stdin_test.txt", b"stdin passphrase works");
+    let encrypted_path = env.file_path("stdin_test.pqe");
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(enc_output.status.success());
+
+    let decrypted_path = env.file_path("stdin_test_dec.txt");
+    let dec_output = Command::new(pqenc_binary())
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        dec_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&dec_output.stderr)
+    );
+    assert_eq!(
+        fs::read(&decrypted_path).unwrap(),
+        b"stdin passphrase works"
+    );
+}
+
+#[test]
+fn test_passphrase_file_strips_trailing_newline() {
+    let env = TempTestEnv::new();
+    let pub_key = env.file_path("nl_pub.key");
+    let priv_key = env.file_path("nl_priv.key");
+
+    // As `echo passphrase > file` would produce: the value plus a trailing \n.
+    let passphrase_path = env.file_path("nl_passphrase.txt");
+    fs::write(&passphrase_path, format!("{}\n", TEST_PASSPHRASE)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&passphrase_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let gen_output = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            passphrase_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        gen_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&gen_output.stderr)
+    );
+
+    // Decrypting with the passphrase *without* the trailing newline must
+    // work -- proving the newline byte isn't part of the stored passphrase.
+    let input_path = env.create_file("nl_test.txt", b"newline stripped");
+    let encrypted_path = env.file_path("nl_test.pqe");
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(enc_output.status.success());
+
+    let decrypted_path = env.file_path("nl_test_dec.txt");
+    let dec_output = Command::new(pqenc_binary())
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            env.passphrase_file(TEST_PASSPHRASE).to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        dec_output.status.success(),
+        "decrypting with the passphrase minus its trailing newline should \
+         work only if generate-keys also stripped it; stderr: {}",
+        String::from_utf8_lossy(&dec_output.stderr)
+    );
+    assert_eq!(fs::read(&decrypted_path).unwrap(), b"newline stripped");
+}
+
+#[test]
+fn test_passphrase_flag_no_longer_exists() {
+    let env = TempTestEnv::new();
+    let output = Command::new(pqenc_binary())
+        .args([
+            "generate-keys",
+            "--public-key",
+            env.file_path("gone_pub.key").to_str().unwrap(),
+            "--private-key",
+            env.file_path("gone_priv.key").to_str().unwrap(),
+            "--passphrase",
+            "somevalue",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "the old --passphrase flag should no longer be recognized"
+    );
+    assert!(!env.file_path("gone_pub.key").exists());
+}
+
+// ---------------------------------------------------------------------
+// --passphrase-file is resolved lazily, only once actually needed (not
+// eagerly in `run()`) -- so a bad/missing passphrase file never breaks a
+// plain-text key or a public-key-only fingerprint, and never blocks
+// reading stdin before cheaper checks (verify preflight) get a chance to
+// fail fast.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_decrypt_unencrypted_key_ignores_missing_passphrase_file() {
+    let env = TempTestEnv::new();
+    let (pub_key, priv_key) = env.generate_keys_with_passphrase("");
+
+    let data = b"plain text key data";
+    let input_path = env.create_file("plain.txt", data);
+    let encrypted_path = env.file_path("plain.pqe");
+    let decrypted_path = env.file_path("plain_dec.txt");
+
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(enc_output.status.success());
+
+    // A --passphrase-file that doesn't exist at all: must still succeed,
+    // since a plain-text private key never needs it.
+    let output = Command::new(pqenc_binary())
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            env.file_path("does_not_exist.txt").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a plain-text key must ignore an unreadable passphrase file entirely; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&decrypted_path).unwrap(), data);
+}
+
+#[test]
+fn test_fingerprint_public_key_ignores_missing_passphrase_file() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    let output = Command::new(pqenc_binary())
+        .args([
+            "fingerprint",
+            "--public-key",
+            pub_key.to_str().unwrap(),
+            "--passphrase-file",
+            env.file_path("does_not_exist.txt").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fingerprinting a public key must ignore an unreadable passphrase file entirely; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_decrypt_does_not_block_on_stdin_passphrase_when_verify_fails_first() {
+    let env = TempTestEnv::new();
+    let (_, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+
+    // Invalid magic bytes: verify_open_file must reject this immediately,
+    // before decrypt ever touches the private key or the passphrase.
+    let mut bad_data = b"XXX1".to_vec();
+    bad_data.extend_from_slice(&[0u8; 2000]);
+    let bad_input = env.create_file("bad.pqe", &bad_data);
+
+    let mut child = Command::new(pqenc_binary())
+        .args([
+            "decrypt",
+            bad_input.to_str().unwrap(),
+            "--output",
+            env.file_path("out.bin").to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase-file",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Take ownership of the write end ourselves and keep it alive -- never
+    // written to, never dropped -- for the rest of this test. child.stdin
+    // is now None, so wait_with_output below won't auto-close anything (it
+    // only closes a handle it still owns); if decrypt ever regresses to
+    // resolving --passphrase-file before the verify preflight, it would
+    // block reading this genuinely-still-open, empty pipe forever.
+    let _keep_stdin_open = child.stdin.take().unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect(
+            "decrypt must fail fast on a corrupted input file rather than \
+             block reading --passphrase-file -",
+        )
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "a corrupted, non-pqenc input file must fail verification"
+    );
 }

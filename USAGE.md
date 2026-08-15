@@ -40,9 +40,10 @@ obtains the file — and neither threat is the one pqenc is built around. An
 attacker who compromises the backup machine gets only `pub.key` either way.
 
 If you deliberately want no passphrase — e.g. the key already lives on an
-encrypted volume, or this is a throwaway test key — pass an empty one:
-`--passphrase ""`. This stores `priv.key` in **plain text**; anyone who can
-read that file can decrypt everything encrypted to the matching public key, no
+encrypted volume, or this is a throwaway test key — point `--passphrase-file`
+at an empty file, e.g. `--passphrase-file /dev/null` (`--passphrase-file NUL`
+on Windows). This stores `priv.key` in **plain text**; anyone who can read
+that file can decrypt everything encrypted to the matching public key, no
 passphrase required. Only do this if the file's own storage is the sole
 protection you're relying on.
 

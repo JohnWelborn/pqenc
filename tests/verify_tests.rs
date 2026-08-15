@@ -1,5 +1,5 @@
 mod helpers;
-use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
+use helpers::{write_passphrase_file, TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
 
@@ -222,6 +222,7 @@ fn run_decrypt(
     output: &std::path::Path,
     priv_key: &std::path::Path,
 ) -> std::process::Output {
+    let passphrase_file = write_passphrase_file(priv_key.parent().unwrap(), TEST_PASSPHRASE);
     Command::new(pqenc_binary())
         .args([
             "decrypt",
@@ -230,8 +231,8 @@ fn run_decrypt(
             output.to_str().unwrap(),
             "--private-key",
             priv_key.to_str().unwrap(),
-            "--passphrase",
-            TEST_PASSPHRASE,
+            "--passphrase-file",
+            passphrase_file.to_str().unwrap(),
         ])
         .output()
         .unwrap()

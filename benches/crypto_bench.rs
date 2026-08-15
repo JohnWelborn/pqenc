@@ -11,6 +11,22 @@ fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
 }
 
+// Written once and reused across runs, same caching rationale as
+// setup_test_keys' keypair below. Must be owner-only on Unix: pqenc's
+// --passphrase-file refuses a group/world-readable file.
+fn bench_passphrase_file() -> PathBuf {
+    let path = std::env::temp_dir().join("bench_passphrase.txt");
+    if !path.exists() {
+        fs::write(&path, BENCH_PASSPHRASE).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
 // Helper to generate keys once for all benchmarks
 fn setup_test_keys() -> (PathBuf, PathBuf) {
     let temp_dir = std::env::temp_dir();
@@ -31,8 +47,8 @@ fn setup_test_keys() -> (PathBuf, PathBuf) {
                 pub_key.to_str().unwrap(),
                 "--private-key",
                 priv_key.to_str().unwrap(),
-                "--passphrase",
-                BENCH_PASSPHRASE,
+                "--passphrase-file",
+                bench_passphrase_file().to_str().unwrap(),
             ])
             .output()
             .expect("Failed to generate benchmark keys");
@@ -104,8 +120,13 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
 
         fs::write(&input_path, &data).unwrap();
 
-        // Encrypt once
-        Command::new(pqenc_binary())
+        // Encrypt once. Fixed filenames are reused across runs (unlike the
+        // per-iteration keygen benchmark below, which randomizes its own
+        // paths), so a stale encrypted_path from a prior run must be
+        // cleared first -- pqenc encrypt refuses to overwrite an existing
+        // output file.
+        let _ = fs::remove_file(&encrypted_path);
+        let setup_output = Command::new(pqenc_binary())
             .args([
                 "encrypt",
                 input_path.to_str().unwrap(),
@@ -116,12 +137,24 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
             ])
             .output()
             .unwrap();
+        // Without this the decrypt benchmark below would silently loop over
+        // a missing/corrupt encrypted_path instead of real ciphertext.
+        assert!(
+            setup_output.status.success(),
+            "Benchmark setup encryption failed: {}",
+            String::from_utf8_lossy(&setup_output.stderr)
+        );
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}KB", size / 1024)),
             size,
             |b, _| {
                 b.iter(|| {
+                    // pqenc decrypt refuses to overwrite an existing output
+                    // file, and this closure runs many times per sample --
+                    // without clearing it first, only the very first
+                    // iteration would ever really decrypt.
+                    let _ = fs::remove_file(&output_path);
                     let output = Command::new(pqenc_binary())
                         .args([
                             "decrypt",
@@ -130,11 +163,15 @@ fn benchmark_decryption_sizes(c: &mut Criterion) {
                             output_path.to_str().unwrap(),
                             "--private-key",
                             priv_key.to_str().unwrap(),
-                            "--passphrase",
-                            BENCH_PASSPHRASE,
+                            "--passphrase-file",
+                            bench_passphrase_file().to_str().unwrap(),
                         ])
                         .output()
                         .unwrap();
+                    // Without this a broken CLI invocation (e.g. clap
+                    // rejecting an argument) would silently measure how
+                    // fast the process fails, not real decryption.
+                    assert!(output.status.success(), "Benchmark decrypt failed");
 
                     black_box(output);
                 });
@@ -164,11 +201,15 @@ fn benchmark_key_generation(c: &mut Criterion) {
                     pub_key.to_str().unwrap(),
                     "--private-key",
                     priv_key.to_str().unwrap(),
-                    "--passphrase",
-                    BENCH_PASSPHRASE,
+                    "--passphrase-file",
+                    bench_passphrase_file().to_str().unwrap(),
                 ])
                 .output()
                 .unwrap();
+            // Without this a broken CLI invocation (e.g. clap rejecting an
+            // argument) would silently measure how fast the process fails,
+            // not real key generation.
+            assert!(output.status.success(), "Benchmark key generation failed");
 
             black_box(output);
 

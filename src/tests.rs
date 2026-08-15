@@ -1571,6 +1571,22 @@ mod format_tests {
 
     const TEST_PASSPHRASE: &str = "pqe3-test-passphrase";
 
+    /// Writes `passphrase` to a file inside `dir` with owner-only
+    /// permissions (required by `resolve_passphrase`, which these
+    /// in-process calls to `generate_keys`/`load_private_key`/
+    /// `decrypt_file*` now go through just like the CLI does) and returns
+    /// its path.
+    fn test_passphrase_file(dir: &std::path::Path, passphrase: &str) -> String {
+        let path = dir.join("test_passphrase.txt");
+        fs::write(&path, passphrase).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path.to_str().unwrap().to_string()
+    }
+
     /// Generates a real keypair on disk via the same `generate_keys` the CLI
     /// uses, so `encrypt_file`/`decrypt_file` (which read PEM files from
     /// paths, not in-memory keys) have real, valid inputs.
@@ -1580,7 +1596,7 @@ mod format_tests {
         generate_keys(
             pub_path.to_str().unwrap(),
             priv_path.to_str().unwrap(),
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir, TEST_PASSPHRASE)),
         )
         .unwrap();
         (
@@ -1602,7 +1618,7 @@ mod format_tests {
         filename: &str,
     ) -> std::path::PathBuf {
         let mut composite_priv =
-            load_private_key(priv_path, Some(TEST_PASSPHRASE.to_string())).unwrap();
+            load_private_key(priv_path, Some(test_passphrase_file(dir, TEST_PASSPHRASE))).unwrap();
         composite_priv.data[4 + 3104] ^= 0xFF;
 
         let corrupted_path = dir.join(filename);
@@ -1673,7 +1689,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
         )
         .unwrap();
 
@@ -1700,7 +1716,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
         )
         .unwrap();
 
@@ -1727,7 +1743,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
         )
         .unwrap();
 
@@ -1758,7 +1774,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
             2,
         )
         .unwrap();
@@ -1806,7 +1822,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
             2,
         );
         assert!(
@@ -1846,7 +1862,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
             2,
         );
         assert!(
@@ -1881,7 +1897,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
             2,
         );
         assert!(
@@ -1915,7 +1931,7 @@ mod format_tests {
             output_path.to_str().unwrap(),
             Some(restored_path.to_str().unwrap()),
             &priv_path,
-            Some(TEST_PASSPHRASE.to_string()),
+            Some(test_passphrase_file(dir.path(), TEST_PASSPHRASE)),
         );
         let err = result.expect_err("corrupted trailer must fail the verify preflight");
         assert!(

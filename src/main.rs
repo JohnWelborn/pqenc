@@ -450,11 +450,11 @@ enum Commands {
         private_key: Option<String>,
         #[arg(
             long,
-            help = "Passphrase for the private key, skipping the interactive prompt. \
-            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Pass an empty value to store/read the private key in plain text (not recommended)."
+            help = "Path to a file containing the passphrase for the private key, skipping the interactive prompt. \
+            Must be owner-only readable on Unix (except /dev/null). \
+            An empty file (e.g. /dev/null on Unix, NUL on Windows) stores/reads the private key in plain text (not recommended)."
         )]
-        passphrase: Option<String>,
+        passphrase_file: Option<String>,
     },
     #[command(about = "Encrypt a file or directory using a public key")]
     Encrypt {
@@ -494,11 +494,10 @@ enum Commands {
         private_key: Option<String>,
         #[arg(
             long,
-            help = "Passphrase for the private key, skipping the interactive prompt. \
-            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
-            Not needed for a plain-text private key; if supplied, it is ignored."
+            help = "Path to a file containing the passphrase for the private key, skipping the interactive prompt. \
+            Must be owner-only readable on Unix."
         )]
-        passphrase: Option<String>,
+        passphrase_file: Option<String>,
     },
     #[command(
         about = "Check an encrypted file for corruption (does not detect tampering)"
@@ -523,11 +522,11 @@ enum Commands {
         private_key: Option<String>,
         #[arg(
             long,
-            help = "Passphrase for the private key, skipping the interactive prompt. \
-            Warning: visible to other users via `ps`/process listings and may be recorded in shell history. \
+            help = "Path to a file containing the passphrase for the private key, skipping the interactive prompt. \
+            Must be owner-only readable on Unix (except /dev/null). \
             Not needed for a plain-text private key or a public key; if supplied and not needed, it is ignored."
         )]
-        passphrase: Option<String>,
+        passphrase_file: Option<String>,
     },
 }
 
@@ -1212,15 +1211,22 @@ fn extract_public_from_private(mlkem_sk: &[u8], x25519_sk: &[u8]) -> Result<Vec<
 }
 
 /// Loads a private key from a PEM file, decrypting it with a passphrase if
-/// it is encrypted (prompting interactively unless one was supplied). A
-/// plain-text key ignores a supplied passphrase, since there is nothing to
-/// decrypt.
-fn load_private_key(private_key_path: &str, passphrase: Option<String>) -> Result<SensitiveData> {
+/// it is encrypted (prompting interactively unless a `--passphrase-file` was
+/// supplied). A plain-text key ignores a supplied passphrase file, since
+/// there is nothing to decrypt -- and, importantly, never resolves it: the
+/// file is only opened (and its permissions checked, since
+/// `resolve_passphrase` refuses a group/world-readable one) once we already
+/// know from the PEM header that it's genuinely needed, so a missing or
+/// insecurely-permissioned passphrase file never breaks a plain-text key.
+fn load_private_key(
+    private_key_path: &str,
+    passphrase_file: Option<String>,
+) -> Result<SensitiveData> {
     let pem_text = fs::read_to_string(private_key_path).context("Failed to read private key")?;
 
     if pem_text.contains(PEM_PRIV_ENC_BEGIN) {
         let encrypted_blob = pem_decode(&pem_text, PEM_PRIV_ENC_BEGIN, PEM_PRIV_ENC_END)?;
-        let mut passphrase = match passphrase {
+        let mut passphrase = match resolve_passphrase(passphrase_file)? {
             Some(p) => p,
             None => {
                 let display_path = std::path::absolute(private_key_path)
@@ -1234,9 +1240,8 @@ fn load_private_key(private_key_path: &str, passphrase: Option<String>) -> Resul
         passphrase.zeroize();
         result
     } else if pem_text.contains(PEM_PRIV_BEGIN) {
-        if let Some(mut p) = passphrase {
+        if passphrase_file.is_some() {
             eprintln!("Note: private key is stored in plain text; ignoring supplied passphrase.");
-            p.zeroize();
         }
         Ok(SensitiveData::new(pem_decode(
             &pem_text,
@@ -1244,9 +1249,6 @@ fn load_private_key(private_key_path: &str, passphrase: Option<String>) -> Resul
             PEM_PRIV_END,
         )?))
     } else {
-        if let Some(mut p) = passphrase {
-            p.zeroize();
-        }
         bail!("Not a valid pqenc private key file: {}", private_key_path);
     }
 }
@@ -1312,14 +1314,16 @@ fn randomart_border(label: &str, width: usize) -> String {
 /// check). Both halves produce an identical fingerprint for the same
 /// keypair, since both ultimately hash the same composite public key bytes
 /// -- see `extract_public_from_private`.
-fn show_fingerprint(key_path: String, passphrase: Option<String>) -> Result<()> {
+fn show_fingerprint(key_path: String, passphrase_file: Option<String>) -> Result<()> {
     validate_path(&key_path, true, false, "Key")?;
     let pem_text = fs::read_to_string(&key_path).context("Failed to read key file")?;
 
     let composite_pub = if pem_text.contains(PEM_PUB_BEGIN) {
-        if let Some(mut p) = passphrase {
+        // Never resolved for a public key -- not even a file-existence
+        // check -- so a missing or insecurely-permissioned passphrase file
+        // never breaks a fingerprint that never needed one.
+        if passphrase_file.is_some() {
             eprintln!("Note: fingerprinting a public key; ignoring supplied passphrase.");
-            p.zeroize();
         }
         let composite_pub = pem_decode(&pem_text, PEM_PUB_BEGIN, PEM_PUB_END)?;
         // Validate structure so a corrupt or foreign file fails clearly.
@@ -1330,7 +1334,7 @@ fn show_fingerprint(key_path: String, passphrase: Option<String>) -> Result<()> 
         validate_mlkem_public_key(&mlkem1024::MlKem1024PublicKey::from(mlkem_pk_array))?;
         composite_pub
     } else if pem_text.contains(PEM_PRIV_BEGIN) || pem_text.contains(PEM_PRIV_ENC_BEGIN) {
-        let composite_priv = load_private_key(&key_path, passphrase)?;
+        let composite_priv = load_private_key(&key_path, passphrase_file)?;
         let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
         let mlkem_sk_array: [u8; MLKEM1024_PRIVATE_KEY_SIZE] = mlkem_sk
             .data
@@ -1481,6 +1485,65 @@ fn resolve_fingerprint_keys(
     Ok((public_key, private_key))
 }
 
+/// Resolves `--passphrase-file` into the actual passphrase string. `None`
+/// means no file was given, so the caller falls back to its own
+/// interactive prompt exactly as before.
+///
+/// A real file path (anything other than "-"/"/dev/stdin", which reads
+/// stdin instead) must be owner-only readable on Unix -- same rationale as
+/// `ensure_owner_only_dir`'s check on `~/.pqenc`: a passphrase file with
+/// looser permissions is exactly the kind of thing that shouldn't be
+/// trusted silently. This is an advisory check (a `metadata` call before
+/// `open_input`'s own open, not one atomic operation), the same level of
+/// rigor `ensure_owner_only_dir`'s own reuse-path permission check already
+/// accepts. "/dev/null" is exempt (nothing on it to protect) -- it's the
+/// documented way to pass an explicitly empty passphrase. There's no
+/// equivalent check on Windows, matching `ensure_owner_only_dir`'s stated
+/// reasoning (profile-relative files there already default to an
+/// owner-restricted ACL).
+///
+/// A single trailing newline (and a preceding \r, for CRLF-authored files)
+/// is stripped, so a plain `echo secret > file` doesn't make the trailing
+/// newline byte part of the passphrase.
+fn resolve_passphrase(passphrase_file: Option<String>) -> Result<Option<String>> {
+    let Some(path) = passphrase_file else {
+        return Ok(None);
+    };
+
+    #[cfg(unix)]
+    if !is_stdin_path(&path) && path != "/dev/null" {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(&path)
+            .with_context(|| format!("Failed to inspect passphrase file: {}", path))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            bail!(
+                "Refusing to read passphrase from {}: expected owner-only permissions (no group/other access), found mode {:o}. Fix with `chmod 600 {}`.",
+                path,
+                mode,
+                path
+            );
+        }
+    }
+
+    let mut reader =
+        open_input(&path).with_context(|| format!("Failed to open passphrase file: {}", path))?;
+    let mut contents = String::new();
+    let read_result = reader.read_to_string(&mut contents);
+    if read_result.is_err() {
+        contents.zeroize();
+    }
+    read_result.with_context(|| format!("Failed to read passphrase from {}", path))?;
+
+    if contents.ends_with('\n') {
+        contents.pop();
+        if contents.ends_with('\r') {
+            contents.pop();
+        }
+    }
+    Ok(Some(contents))
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1488,11 +1551,11 @@ fn run() -> Result<()> {
         Commands::GenerateKeys {
             public_key,
             private_key,
-            passphrase,
+            passphrase_file,
         } => {
             let public_key = resolve_new_key_path(public_key, DEFAULT_PUB_KEY_FILENAME)?;
             let private_key = resolve_new_key_path(private_key, DEFAULT_PRIV_KEY_FILENAME)?;
-            generate_keys(&public_key, &private_key, passphrase)?;
+            generate_keys(&public_key, &private_key, passphrase_file)?;
         }
         Commands::Encrypt {
             input,
@@ -1512,7 +1575,7 @@ fn run() -> Result<()> {
             input,
             output,
             private_key,
-            passphrase,
+            passphrase_file,
         } => {
             let private_key = resolve_existing_key_path(
                 private_key,
@@ -1520,7 +1583,7 @@ fn run() -> Result<()> {
                 "private key",
                 "--private-key",
             )?;
-            decrypt_file(&input, output.as_deref(), &private_key, passphrase)?;
+            decrypt_file(&input, output.as_deref(), &private_key, passphrase_file)?;
         }
         Commands::Verify { input } => {
             verify_file(&input)?;
@@ -1528,22 +1591,22 @@ fn run() -> Result<()> {
         Commands::Fingerprint {
             public_key,
             private_key,
-            passphrase,
+            passphrase_file,
         } => {
             let (public_key, private_key) = resolve_fingerprint_keys(public_key, private_key)?;
-            // The passphrase is only ever consumed by whichever call turns
-            // out to be the private key, so when both are selected, the
-            // public-key call gets `None` rather than a clone -- avoids
-            // leaving an unwiped copy of the secret behind when the private
-            // key isn't selected (that call, and thus its zeroize, would
-            // never run) and avoids cloning it at all otherwise.
+            // The passphrase file is only ever relevant to whichever call
+            // turns out to be the private key, so when both are selected,
+            // the public-key call gets `None` outright -- it never even
+            // opens the file, let alone reads/permission-checks it -- rather
+            // than resolving it and discarding the result. That also means
+            // it's never resolved twice.
             match (public_key, private_key) {
                 (Some(pk), Some(sk)) => {
                     show_fingerprint(pk, None)?;
-                    show_fingerprint(sk, passphrase)?;
+                    show_fingerprint(sk, passphrase_file)?;
                 }
                 (Some(key), None) | (None, Some(key)) => {
-                    show_fingerprint(key, passphrase)?;
+                    show_fingerprint(key, passphrase_file)?;
                 }
                 (None, None) => {
                     unreachable!("resolve_fingerprint_keys guarantees at least one key")
@@ -1573,8 +1636,10 @@ fn run() -> Result<()> {
 /// # Arguments
 /// * `public_key_path` - Path where public key will be saved
 /// * `private_key_path` - Path where private key will be saved
-/// * `passphrase` - If given, used instead of the interactive prompt. An
-///   empty passphrase stores the private key in plain text.
+/// * `passphrase_file` - Path to a file (or "-"/"/dev/stdin") containing the passphrase, used
+///   instead of the interactive prompt. An empty passphrase stores the private key in plain
+///   text. Resolved at the point it's consumed below, after the occupied-destination check --
+///   so a bad passphrase file is never opened for a run that would have been refused anyway.
 ///
 /// # Returns
 /// * `Ok(())` on success
@@ -1582,7 +1647,7 @@ fn run() -> Result<()> {
 fn generate_keys(
     public_key_path: &str,
     private_key_path: &str,
-    passphrase: Option<String>,
+    passphrase_file: Option<String>,
 ) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -1654,8 +1719,8 @@ fn generate_keys(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| private_key_path.to_string());
 
-    // Prompt for a passphrase, unless one was supplied on the command line.
-    let (mut passphrase1, mut passphrase2) = match passphrase {
+    // Prompt for a passphrase, unless a --passphrase-file was supplied.
+    let (mut passphrase1, mut passphrase2) = match resolve_passphrase(passphrase_file)? {
         Some(p) => (p.clone(), p),
         None => {
             eprintln!(
@@ -3434,13 +3499,13 @@ fn decrypt_file(
     input_path: &str,
     output_path: Option<&str>,
     private_key_path: &str,
-    passphrase: Option<String>,
+    passphrase_file: Option<String>,
 ) -> Result<()> {
     decrypt_file_with_segment_size(
         input_path,
         output_path,
         private_key_path,
-        passphrase,
+        passphrase_file,
         CHUNKS_PER_SEGMENT,
     )
 }
@@ -3476,7 +3541,11 @@ fn decrypt_file(
 /// * `output_path` - Path where decrypted file will be written, or `None` to derive
 ///   one from embedded metadata or the input filename (see `resolve_decrypt_output`)
 /// * `private_key_path` - Path to the hybrid private key (passphrase-encrypted or plain text)
-/// * `passphrase` - If given, used instead of the interactive prompt (ignored if the key is plain text)
+/// * `passphrase_file` - Path to a file (or "-"/"/dev/stdin") containing the passphrase, used
+///   instead of the interactive prompt. Resolved (read, permission-checked) only once the
+///   private key is confirmed encrypted, at the `load_private_key` call below -- not up front --
+///   so it's never touched for a plain-text key, and never blocks (e.g. on stdin) before the
+///   verify preflight above has had a chance to reject a corrupted input file.
 /// * `chunks_per_segment` - rekey cadence. Production callers must always
 ///   pass `CHUNKS_PER_SEGMENT` (see `decrypt_file`) -- this is a test-only
 ///   seam, not a format parameter.
@@ -3488,7 +3557,7 @@ fn decrypt_file_with_segment_size(
     input_path: &str,
     output_path: Option<&str>,
     private_key_path: &str,
-    passphrase: Option<String>,
+    passphrase_file: Option<String>,
     chunks_per_segment: u64,
 ) -> Result<()> {
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
@@ -3541,7 +3610,7 @@ fn decrypt_file_with_segment_size(
     println!("Verify passed. Decrypting...");
 
     // Read and decrypt (or, for a plain-text key, simply decode) the private key
-    let composite_priv = load_private_key(private_key_path, passphrase)?;
+    let composite_priv = load_private_key(private_key_path, passphrase_file)?;
     let (mlkem_sk, x25519_sk) = parse_private_composite_key(&composite_priv.data)?;
 
     let VerifiedFile { parsed, body_end } = verified;
