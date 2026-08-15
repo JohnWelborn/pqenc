@@ -10,7 +10,15 @@ needed.
 pqenc generate-keys --public-key pub.key --private-key priv.key
 ```
 
-Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine that will be doing backups.
+`--public-key`/`--private-key` can be omitted. `generate-keys` then writes to
+the default location, `~/.pqenc/pub.key` and `~/.pqenc/priv.key` (creating
+that directory, owner-only, if it doesn't exist yet), and `encrypt`/
+`decrypt`/`fingerprint` read from there automatically when no key is given.
+This guide uses explicit paths throughout since the two-machine workflow
+below needs to name each file anyway, but for single-machine use
+`pqenc generate-keys` with no flags is equivalent to the command above.
+
+Store `priv.key` somewhere secure and offline. Copy `pub.key` to the machine that will be doing backups. (If you used the default location, that means moving `~/.pqenc/priv.key` off the backup machine — the default location is a convenience for finding the keys, not a substitute for this step.)
 
 Key generation prints a fingerprint and randomart image for the new keypair,
 in the style of `ssh-keygen`. Note it down (or compare it by eye against the

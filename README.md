@@ -40,6 +40,16 @@ pqenc encrypt bank.txt -p pub.key -o secret.pqe
 pqenc decrypt secret.pqe -s priv.key
 ```
 
+**Default key location:** `-p`/`-s` can be omitted. `generate-keys` then writes to `~/.pqenc/pub.key` and `~/.pqenc/priv.key` (creating that directory, owner-only, if needed), and `encrypt`/`decrypt`/`fingerprint` read from there when no key is given:
+
+```bash
+pqenc generate-keys
+pqenc encrypt bank.txt -o secret.pqe
+pqenc decrypt secret.pqe
+```
+
+This is a convenience for single-machine use. For the offline-private-key workflow described above, move (or copy) `~/.pqenc/priv.key` to offline storage after generating it — the default location does not do that for you.
+
 **Encrypting a directory (tar+gzip streamed internally, never written to disk):**
 
 ```bash

@@ -320,6 +320,13 @@ const OWNER_ONLY_MODE: u32 = 0o600;
 /// key, which is *meant* to be handed out — deliberately not `OWNER_ONLY_MODE`.
 const DISTRIBUTABLE_MODE: u32 = 0o666;
 
+// Default key location, used whenever `--public-key`/`--private-key` (or
+// fingerprint's key path) are omitted -- see `default_key_path` and the
+// `resolve_*_key_path` helpers below.
+const DEFAULT_KEY_DIR_NAME: &str = ".pqenc";
+const DEFAULT_PUB_KEY_FILENAME: &str = "pub.key";
+const DEFAULT_PRIV_KEY_FILENAME: &str = "priv.key";
+
 // X25519 and hybrid constants
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
 const X25519_PRIVATE_KEY_SIZE: usize = 32;
@@ -397,22 +404,29 @@ const PEM_PRIV_END: &str = "-----END PQENC PRIVATE KEY-----";
     arg_required_else_help = true,
     after_help = "\
 Examples:
-  # Generate a new keypair
-  pqenc generate-keys --public-key pub.key --private-key priv.key
+  # By default the following examples use:
+  # --public-key ~/.pqenc/pub.key
+  # --private-key ~/.pqenc/priv.key
+
+  # Generate a new keypair in the default location
+  pqenc generate-keys
 
   # Encrypt a file
-  pqenc encrypt secret.txt --output secret.pqe --public-key pub.key
+  pqenc encrypt secret.txt --output secret.pqe
 
   # Decrypt a file
-  pqenc decrypt secret.pqe --output secret.txt --private-key priv.key
+  pqenc decrypt secret.pqe --output secret.txt
 
   # Encrypt a directory (decrypts to a tar+gzip archive)
-  pqenc encrypt mydir --output secret.pqe --public-key pub.key
+  pqenc encrypt mydir --output secret.pqe
 
   # Check an encrypted file for corruption (does not detect tampering)
   pqenc verify secret.pqe
 
-  # Show a key's fingerprint and randomart
+  # Show the default key's fingerprint and randomart
+  pqenc fingerprint
+
+  # Show a specific key's fingerprint and randomart
   pqenc fingerprint pub.key
   pqenc fingerprint priv.key
 "
@@ -426,10 +440,18 @@ struct Cli {
 enum Commands {
     #[command(about = "Generate a new ML-KEM-1024 + X25519 hybrid keypair")]
     GenerateKeys {
-        #[arg(long, short = 'p')]
-        public_key: String,
-        #[arg(long, short = 's')]
-        private_key: String,
+        #[arg(
+            long,
+            short = 'p',
+            help = "Path to save the public key (default: ~/.pqenc/pub.key)"
+        )]
+        public_key: Option<String>,
+        #[arg(
+            long,
+            short = 's',
+            help = "Path to save the private key (default: ~/.pqenc/priv.key)"
+        )]
+        private_key: Option<String>,
         #[arg(
             long,
             help = "Passphrase for the private key, skipping the interactive prompt. \
@@ -451,8 +473,12 @@ enum Commands {
             help = "Output file (default: <input>.pqe for a file, or <dirname>.tar.gz.pqe for a directory)"
         )]
         output: Option<String>,
-        #[arg(long, short = 'p')]
-        public_key: String,
+        #[arg(
+            long,
+            short = 'p',
+            help = "Recipient's public key (default: ~/.pqenc/pub.key)"
+        )]
+        public_key: Option<String>,
     },
     #[command(about = "Decrypt a file using the private key")]
     Decrypt {
@@ -464,8 +490,12 @@ enum Commands {
             help = "Output file (default: derived from the original filename embedded in the encrypted file, or by stripping a trailing .pqe from the input path)"
         )]
         output: Option<String>,
-        #[arg(long, short = 's')]
-        private_key: String,
+        #[arg(
+            long,
+            short = 's',
+            help = "Path to the private key (default: ~/.pqenc/priv.key)"
+        )]
+        private_key: Option<String>,
         #[arg(
             long,
             help = "Passphrase for the private key, skipping the interactive prompt. \
@@ -483,8 +513,9 @@ enum Commands {
     },
     #[command(about = "Show a key's fingerprint and randomart")]
     Fingerprint {
-        #[arg(help = "Public or private key file to fingerprint (auto-detected)")]
-        key: String,
+        #[arg(help = "Public or private key file to fingerprint (auto-detected). \
+            Default: ~/.pqenc/pub.key, falling back to ~/.pqenc/priv.key.")]
+        key: Option<String>,
         #[arg(
             long,
             help = "Passphrase for the private key, skipping the interactive prompt. \
@@ -557,6 +588,104 @@ fn sync_parent_dir(path: &str) -> Result<()> {
 
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Resolves the user's home directory, for locating the default
+/// `~/.pqenc` key directory. Reads `$HOME` on Unix, `%USERPROFILE%` on
+/// Windows -- the same environment variables the OS itself populates at
+/// login, and (deliberately) not a higher-level crate: this lets tests
+/// exercise default-path resolution by setting that one variable on a
+/// child process, with no shared mutable state to coordinate.
+#[cfg(unix)]
+fn home_dir() -> Result<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .context("Cannot determine home directory: $HOME is not set")
+}
+
+#[cfg(windows)]
+fn home_dir() -> Result<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .context("Cannot determine home directory: %USERPROFILE% is not set")
+}
+
+/// The default key directory, `~/.pqenc`.
+fn default_pqenc_dir() -> Result<std::path::PathBuf> {
+    Ok(home_dir()?.join(DEFAULT_KEY_DIR_NAME))
+}
+
+/// The default path for a key file named `filename` (`DEFAULT_PUB_KEY_FILENAME`
+/// or `DEFAULT_PRIV_KEY_FILENAME`) inside the default key directory.
+fn default_key_path(filename: &str) -> Result<std::path::PathBuf> {
+    Ok(default_pqenc_dir()?.join(filename))
+}
+
+/// Ensures `dir` exists as an owner-only directory, creating it if absent.
+///
+/// Mirrors the file-level philosophy documented above `OWNER_ONLY_MODE`:
+/// permissions are established atomically at creation, not fixed up
+/// afterward. If `dir` already exists, it is reused as-is except on Unix,
+/// where its mode is cheaply re-checked (one stat call) and rejected if
+/// looser than 0700 -- an existing insecure directory is exactly the kind of
+/// thing a private key should never be written into silently. There is no
+/// equivalent recheck of an existing directory's DACL on Windows: that would
+/// mean promoting the DACL-enumeration logic that today only exists in test
+/// code into production, and unlike Unix's permissive-by-default umask, a
+/// Windows user's profile directory (and everything newly created under it)
+/// already defaults to an owner-restricted ACL, so the residual risk from
+/// skipping that check is materially smaller than on Unix.
+fn ensure_owner_only_dir(dir: &std::path::Path) -> Result<()> {
+    #[cfg(windows)]
+    match windows_security::create_dir_owner_only(dir) {
+        // Syncing a file's data doesn't guarantee the directory entry
+        // pointing to it survives a crash (see `sync_parent_dir`'s doc
+        // comment) -- and the same is true one level up, for the directory
+        // entry `dir` itself just created inside its parent. Without this,
+        // a crash right after `generate-keys` reports success could leave
+        // the parent with no entry for `dir` at all on reboot, stranding
+        // whatever gets synced inside it afterward (the key files).
+        Ok(()) => {
+            return sync_parent_dir(&dir.to_string_lossy())
+                .context("Failed to sync directory containing the new key directory")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("Failed to create {}", dir.display())),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {
+                return sync_parent_dir(&dir.to_string_lossy())
+                    .context("Failed to sync directory containing the new key directory")
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("Failed to create {}", dir.display())),
+        }
+    }
+
+    // Reuse path: dir already existed.
+    let meta = fs::metadata(dir).with_context(|| format!("Failed to inspect {}", dir.display()))?;
+    if !meta.is_dir() {
+        bail!("{} exists and is not a directory", dir.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            bail!(
+                "Refusing to store keys in {}: expected owner-only permissions (0700), found {:o}. Fix with `chmod 700 {}`.",
+                dir.display(),
+                mode,
+                dir.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1254,6 +1383,70 @@ fn open_input(path: &str) -> Result<Box<dyn Read>> {
     }
 }
 
+/// Resolves a key path for `generate-keys`: an explicit `--public-key`/
+/// `--private-key` value wins as-is (its parent directory must already
+/// exist, unchanged from today's behavior); otherwise resolves to
+/// `~/.pqenc/<filename>`, creating that directory (owner-only) first if
+/// needed. Does not check whether the resolved path itself is already
+/// occupied -- that's `generate_keys`'s own advisory pre-check and exclusive
+/// create, run identically regardless of where the path came from.
+fn resolve_new_key_path(explicit: Option<String>, filename: &str) -> Result<String> {
+    match explicit {
+        Some(path) => Ok(path),
+        None => {
+            let dir = default_pqenc_dir()?;
+            ensure_owner_only_dir(&dir)?;
+            Ok(dir.join(filename).display().to_string())
+        }
+    }
+}
+
+/// Resolves a key path for `encrypt`/`decrypt`: an explicit value wins as-is;
+/// otherwise resolves to `~/.pqenc/<filename>` and requires it to already
+/// exist.
+fn resolve_existing_key_path(
+    explicit: Option<String>,
+    filename: &str,
+    description: &str,
+    flag: &str,
+) -> Result<String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let path = default_key_path(filename)?;
+    if !path.exists() {
+        bail!(
+            "No {} specified and none found at {}. Pass {} or run `pqenc generate-keys`.",
+            description,
+            path.display(),
+            flag
+        );
+    }
+    Ok(path.display().to_string())
+}
+
+/// Resolves the key path for `fingerprint`: an explicit value wins as-is;
+/// otherwise tries `~/.pqenc/pub.key` (never needs a passphrase, so it's the
+/// faster default) and falls back to `~/.pqenc/priv.key`.
+fn resolve_fingerprint_key_path(explicit: Option<String>) -> Result<String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let pub_path = default_key_path(DEFAULT_PUB_KEY_FILENAME)?;
+    if pub_path.exists() {
+        return Ok(pub_path.display().to_string());
+    }
+    let priv_path = default_key_path(DEFAULT_PRIV_KEY_FILENAME)?;
+    if priv_path.exists() {
+        return Ok(priv_path.display().to_string());
+    }
+    bail!(
+        "No key specified and none found at {} or {}. Pass a key path or run `pqenc generate-keys`.",
+        pub_path.display(),
+        priv_path.display()
+    );
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1263,6 +1456,8 @@ fn run() -> Result<()> {
             private_key,
             passphrase,
         } => {
+            let public_key = resolve_new_key_path(public_key, DEFAULT_PUB_KEY_FILENAME)?;
+            let private_key = resolve_new_key_path(private_key, DEFAULT_PRIV_KEY_FILENAME)?;
             generate_keys(&public_key, &private_key, passphrase)?;
         }
         Commands::Encrypt {
@@ -1270,6 +1465,12 @@ fn run() -> Result<()> {
             output,
             public_key,
         } => {
+            let public_key = resolve_existing_key_path(
+                public_key,
+                DEFAULT_PUB_KEY_FILENAME,
+                "public key",
+                "--public-key",
+            )?;
             let output = resolve_encrypt_output(&input, output)?;
             encrypt_file(&input, &output, &public_key)?;
         }
@@ -1279,12 +1480,19 @@ fn run() -> Result<()> {
             private_key,
             passphrase,
         } => {
+            let private_key = resolve_existing_key_path(
+                private_key,
+                DEFAULT_PRIV_KEY_FILENAME,
+                "private key",
+                "--private-key",
+            )?;
             decrypt_file(&input, output.as_deref(), &private_key, passphrase)?;
         }
         Commands::Verify { input } => {
             verify_file(&input)?;
         }
         Commands::Fingerprint { key, passphrase } => {
+            let key = resolve_fingerprint_key_path(key)?;
             show_fingerprint(key, passphrase)?;
         }
     }

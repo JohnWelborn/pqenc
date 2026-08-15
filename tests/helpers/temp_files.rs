@@ -1,6 +1,18 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
+
+/// Points `cmd`'s `HOME` (Unix) and `USERPROFILE` (Windows) at `home`, so a
+/// subprocess run with it resolves pqenc's default `~/.pqenc` key location
+/// to `home/.pqenc` -- only the platform-relevant variable is ever read by
+/// `home_dir()` in src/main.rs, so setting both unconditionally is harmless
+/// and keeps tests platform-agnostic. Each invocation gets its own child
+/// process, so there's no shared mutable state between tests to coordinate.
+#[allow(dead_code)]
+pub fn set_fake_home(cmd: &mut Command, home: &Path) {
+    cmd.env("HOME", home).env("USERPROFILE", home);
+}
 
 pub struct TempTestEnv {
     _dir: TempDir,
@@ -33,8 +45,6 @@ impl TempTestEnv {
     }
 
     pub fn generate_keys_with_passphrase(&self, passphrase: &str) -> (PathBuf, PathBuf) {
-        use std::process::Command;
-
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
         let output = Command::new(binary)
@@ -66,8 +76,6 @@ impl TempTestEnv {
         output: &str,
         passphrase: &str,
     ) -> Result<(), String> {
-        use std::process::Command;
-
         let binary = env!("CARGO_BIN_EXE_pqenc");
 
         let result = Command::new(binary)

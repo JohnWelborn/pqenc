@@ -1,7 +1,8 @@
 mod helpers;
-use helpers::{TempTestEnv, TestData, TEST_PASSPHRASE};
+use helpers::{set_fake_home, TempTestEnv, TestData, TEST_PASSPHRASE};
 use std::fs;
 use std::process::Command;
+use tempfile::TempDir;
 
 fn pqenc_binary() -> String {
     env!("CARGO_BIN_EXE_pqenc").to_string()
@@ -1499,18 +1500,13 @@ fn test_fingerprint_command_matches_for_public_and_private_key() {
 }
 
 #[test]
-fn test_fingerprint_requires_exactly_one_argument() {
+fn test_fingerprint_rejects_extra_argument() {
+    // fingerprint takes at most one positional (it's now optional, defaulting
+    // to ~/.pqenc -- see the default-key-location tests below); two is still
+    // a clap parse error.
     let env = TempTestEnv::new();
     let (pub_key, priv_key) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
 
-    // No key path supplied.
-    let neither = Command::new(pqenc_binary())
-        .args(["fingerprint"])
-        .output()
-        .unwrap();
-    assert!(!neither.status.success());
-
-    // Two key paths supplied.
     let both = Command::new(pqenc_binary())
         .args([
             "fingerprint",
@@ -1585,4 +1581,473 @@ fn test_encrypt_prints_recipient_fingerprint_matching_key_file() {
         extract_sha256_fingerprint(&fingerprint_stdout),
         "encrypt should report the same fingerprint as the fingerprint command"
     );
+}
+
+// ---------------------------------------------------------------------
+// Default key location (~/.pqenc/pub.key, ~/.pqenc/priv.key)
+//
+// Each test below points a fresh `TempDir` at the child process's `HOME`
+// (and, harmlessly, `USERPROFILE`) via `set_fake_home`, so none of this
+// touches -- or is affected by -- the real developer/CI home directory.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_generate_keys_defaults_to_pqenc_dir() {
+    let home = TempDir::new().unwrap();
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pqenc_dir = home.path().join(".pqenc");
+    assert!(pqenc_dir.join("pub.key").is_file());
+    assert!(pqenc_dir.join("priv.key").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_generate_keys_default_dir_and_keys_have_owner_only_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    // Same umask-in-a-child-shell technique as
+    // test_generate_keys_key_file_permissions above: umask(2) is get-and-set,
+    // so reading/setting it from a threaded test harness is racy.
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(r#"umask 022; exec "$0" "$@""#)
+        .arg(pqenc_binary())
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE]);
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pqenc_dir = home.path().join(".pqenc");
+    let dir_mode = fs::metadata(&pqenc_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "default key dir should be owner-only, got {:o}",
+        dir_mode
+    );
+
+    let priv_mode = fs::metadata(pqenc_dir.join("priv.key"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(priv_mode, 0o600);
+    let pub_mode = fs::metadata(pqenc_dir.join("pub.key"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(pub_mode, 0o644);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_generate_keys_default_dir_and_keys_have_owner_only_permissions_windows() {
+    let home = TempDir::new().unwrap();
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected: std::collections::HashSet<String> =
+        [windows_dacl::current_user_sid(), "S-1-5-18".to_string()]
+            .into_iter()
+            .collect();
+
+    let pqenc_dir = home.path().join(".pqenc");
+    let (dir_sids, dir_protected) = windows_dacl::grantees_and_protected(&pqenc_dir);
+    assert_eq!(
+        dir_sids, expected,
+        "default key dir DACL should grant access to exactly {{current user, SYSTEM}}"
+    );
+    assert!(dir_protected, "default key dir DACL should be protected");
+
+    let (priv_sids, priv_protected) =
+        windows_dacl::grantees_and_protected(&pqenc_dir.join("priv.key"));
+    assert_eq!(priv_sids, expected);
+    assert!(priv_protected);
+}
+
+#[test]
+fn test_generate_keys_refuses_occupied_default_path() {
+    let home = TempDir::new().unwrap();
+    let pqenc_dir = home.path().join(".pqenc");
+    fs::create_dir_all(&pqenc_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&pqenc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    const SENTINEL: &[u8] = b"an existing key file that must not be touched";
+    let priv_key = pqenc_dir.join("priv.key");
+    fs::write(&priv_key, SENTINEL).unwrap();
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "must refuse an occupied default path"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already exists"), "stderr: {}", stderr);
+    assert_eq!(
+        fs::read(&priv_key).unwrap(),
+        SENTINEL,
+        "existing file was modified"
+    );
+    assert!(!pqenc_dir.join("pub.key").exists());
+}
+
+#[test]
+fn test_generate_keys_reuses_existing_default_dir() {
+    let home = TempDir::new().unwrap();
+    let pqenc_dir = home.path().join(".pqenc");
+    fs::create_dir_all(&pqenc_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&pqenc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(pqenc_dir.join("pub.key").is_file());
+    assert!(pqenc_dir.join("priv.key").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_generate_keys_refuses_insecure_existing_default_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    let pqenc_dir = home.path().join(".pqenc");
+    fs::create_dir_all(&pqenc_dir).unwrap();
+    fs::set_permissions(&pqenc_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "must refuse an insecurely-permissioned existing default dir"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("owner-only") && stderr.contains("0700"),
+        "stderr: {}",
+        stderr
+    );
+    assert!(!pqenc_dir.join("pub.key").exists());
+    assert!(!pqenc_dir.join("priv.key").exists());
+}
+
+#[test]
+fn test_encrypt_defaults_to_pqenc_public_key() {
+    let home = TempDir::new().unwrap();
+    let mut gen_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut gen_cmd, home.path());
+    let gen_output = gen_cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(gen_output.status.success());
+
+    let work_dir = TempDir::new().unwrap();
+    let input_path = work_dir.path().join("input.txt");
+    fs::write(&input_path, b"hello default key").unwrap();
+    let encrypted_path = work_dir.path().join("input.pqe");
+
+    let mut enc_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut enc_cmd, home.path());
+    let enc_output = enc_cmd
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        enc_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&enc_output.stderr)
+    );
+
+    // Decrypt with the explicit private key to confirm it really encrypted
+    // to the default public key.
+    let decrypted_path = work_dir.path().join("output.txt");
+    let priv_key = home.path().join(".pqenc").join("priv.key");
+    let dec_output = Command::new(pqenc_binary())
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
+        .output()
+        .unwrap();
+    assert!(dec_output.status.success());
+    assert_eq!(fs::read(&decrypted_path).unwrap(), b"hello default key");
+}
+
+#[test]
+fn test_encrypt_missing_default_public_key_errors() {
+    let home = TempDir::new().unwrap();
+    let work_dir = TempDir::new().unwrap();
+    let input_path = work_dir.path().join("input.txt");
+    fs::write(&input_path, b"hello").unwrap();
+    let encrypted_path = work_dir.path().join("input.pqe");
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pub.key"), "stderr: {}", stderr);
+    assert!(stderr.contains("--public-key"), "stderr: {}", stderr);
+    assert!(!encrypted_path.exists());
+}
+
+#[test]
+fn test_decrypt_defaults_to_pqenc_private_key() {
+    let home = TempDir::new().unwrap();
+    let mut gen_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut gen_cmd, home.path());
+    let gen_output = gen_cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(gen_output.status.success());
+
+    let work_dir = TempDir::new().unwrap();
+    let input_path = work_dir.path().join("input.txt");
+    fs::write(&input_path, b"hello default private key").unwrap();
+    let encrypted_path = work_dir.path().join("input.pqe");
+    let pub_key = home.path().join(".pqenc").join("pub.key");
+    let enc_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(enc_output.status.success());
+
+    let decrypted_path = work_dir.path().join("output.txt");
+    let mut dec_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut dec_cmd, home.path());
+    let dec_output = dec_cmd
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        dec_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&dec_output.stderr)
+    );
+    assert_eq!(
+        fs::read(&decrypted_path).unwrap(),
+        b"hello default private key"
+    );
+}
+
+#[test]
+fn test_decrypt_missing_default_private_key_errors() {
+    let env = TempTestEnv::new();
+    let (pub_key, _) = env.generate_keys_with_passphrase(TEST_PASSPHRASE);
+    let input_path = env.create_file("input.txt", b"hello");
+    let encrypted_path = env.file_path("input.pqe");
+    let encrypt_output = Command::new(pqenc_binary())
+        .args([
+            "encrypt",
+            input_path.to_str().unwrap(),
+            "--output",
+            encrypted_path.to_str().unwrap(),
+            "--public-key",
+            pub_key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(encrypt_output.status.success());
+
+    let home = TempDir::new().unwrap();
+    let decrypted_path = env.file_path("output.txt");
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd
+        .args([
+            "decrypt",
+            encrypted_path.to_str().unwrap(),
+            "--output",
+            decrypted_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("priv.key"), "stderr: {}", stderr);
+    assert!(stderr.contains("--private-key"), "stderr: {}", stderr);
+}
+
+#[test]
+fn test_fingerprint_defaults_prefers_public_key() {
+    let home = TempDir::new().unwrap();
+    let mut gen_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut gen_cmd, home.path());
+    let gen_output = gen_cmd
+        .args(["generate-keys", "--passphrase", TEST_PASSPHRASE])
+        .output()
+        .unwrap();
+    assert!(gen_output.status.success());
+
+    let mut fp_cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut fp_cmd, home.path());
+    let output = fp_cmd.args(["fingerprint"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {}", stderr);
+    assert!(
+        !stderr.contains("Enter passphrase for"),
+        "fingerprint should default to the public key, which never needs a passphrase; stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_fingerprint_falls_back_to_private_key() {
+    let home = TempDir::new().unwrap();
+    let pqenc_dir = home.path().join(".pqenc");
+    fs::create_dir_all(&pqenc_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&pqenc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    // Generate a plain-text (no passphrase) keypair elsewhere, then copy only
+    // the private key into the default dir, so pub.key is absent there and
+    // the resolver must fall back to priv.key.
+    let env = TempTestEnv::new();
+    let (_, priv_key) = env.generate_keys_with_passphrase("");
+    fs::copy(&priv_key, pqenc_dir.join("priv.key")).unwrap();
+
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd.args(["fingerprint"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_fingerprint_missing_default_key_errors() {
+    let home = TempDir::new().unwrap();
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, home.path());
+    let output = cmd.args(["fingerprint"]).output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pub.key"), "stderr: {}", stderr);
+    assert!(stderr.contains("priv.key"), "stderr: {}", stderr);
+}
+
+#[test]
+fn test_explicit_key_flags_never_touch_default_location() {
+    // A garbage HOME with nothing in it: if any explicit-path call site
+    // accidentally consulted the default location, it would fail here.
+    let home = TempDir::new().unwrap();
+    let bogus_home = home.path().join("does-not-exist");
+
+    let env = TempTestEnv::new();
+    let mut cmd = Command::new(pqenc_binary());
+    set_fake_home(&mut cmd, &bogus_home);
+    let output = cmd
+        .args([
+            "generate-keys",
+            "--public-key",
+            env.file_path("explicit_pub.key").to_str().unwrap(),
+            "--private-key",
+            env.file_path("explicit_priv.key").to_str().unwrap(),
+            "--passphrase",
+            TEST_PASSPHRASE,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "explicit -p/-s must not require a resolvable HOME; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(env.file_path("explicit_pub.key").is_file());
+    assert!(env.file_path("explicit_priv.key").is_file());
 }

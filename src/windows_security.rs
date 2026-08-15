@@ -33,7 +33,8 @@ use windows_sys::Win32::Security::{
     TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -49,27 +50,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 /// same situation.
 pub(crate) fn create_owner_only(path: &Path, creation_disposition: u32) -> io::Result<File> {
     let owner_sid = current_user_sid_string()?;
-    // "SY" is the standard SDDL alias for S-1-5-18 (LOCAL SYSTEM); no
-    // runtime lookup is needed for it. "P" marks the DACL protected, which
-    // blocks inheritable ACEs from the parent directory from merging in --
-    // without it, a permissive parent ACL (e.g. Everyone) could still leak
-    // through even with only two ACEs listed explicitly. "FA" grants File
-    // All Access (full control) to each listed principal.
-    let sddl = format!("O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)");
-    let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
-
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let ok = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl_wide.as_ptr(),
-            SDDL_REVISION_1,
-            &mut sd,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let sd = owner_only_security_descriptor(&owner_sid)?;
 
     // `sd` is LocalAlloc'd by the call above; every exit path from here
     // must free it exactly once.
@@ -109,6 +90,72 @@ pub(crate) fn create_owner_only(path: &Path, creation_disposition: u32) -> io::R
 
     unsafe { LocalFree(sd as _) };
     result
+}
+
+/// Creates directory `path` with a DACL restricted to the current user and
+/// `SYSTEM`, applied atomically at creation via `CreateDirectoryW`'s
+/// security-attributes argument -- the directory analogue of
+/// `create_owner_only`. Unlike `CreateFileW`, `CreateDirectoryW` has no
+/// creation-disposition concept: it only ever creates, failing with
+/// `ERROR_ALREADY_EXISTS` (surfaced as `io::ErrorKind::AlreadyExists`) if
+/// `path` already exists, leaving that existing directory's ACL untouched.
+/// Callers that want to tolerate a pre-existing directory handle that
+/// `AlreadyExists` case themselves.
+pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
+    let owner_sid = current_user_sid_string()?;
+    let sd = owner_only_security_descriptor(&owner_sid)?;
+
+    // `sd` is LocalAlloc'd by the call above; every exit path from here
+    // must free it exactly once.
+    let result = (|| {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: 0,
+        };
+        if unsafe { CreateDirectoryW(path_wide.as_ptr(), &sa) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+
+    unsafe { LocalFree(sd as _) };
+    result
+}
+
+/// Builds a security descriptor granting full control to exactly `owner_sid`
+/// and `SYSTEM`, marked protected against inherited ACEs -- the shared core
+/// of `create_owner_only` and `create_dir_owner_only`. Returns a raw,
+/// `LocalAlloc`'d `PSECURITY_DESCRIPTOR`; the caller owns it and must
+/// `LocalFree` it exactly once on every exit path.
+fn owner_only_security_descriptor(owner_sid: &str) -> io::Result<PSECURITY_DESCRIPTOR> {
+    // "SY" is the standard SDDL alias for S-1-5-18 (LOCAL SYSTEM); no
+    // runtime lookup is needed for it. "P" marks the DACL protected, which
+    // blocks inheritable ACEs from the parent directory from merging in --
+    // without it, a permissive parent ACL (e.g. Everyone) could still leak
+    // through even with only two ACEs listed explicitly. "FA" grants File
+    // All Access (full control) to each listed principal.
+    let sddl = format!("O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)");
+    let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(sd)
 }
 
 /// Fetches the current process's user SID and renders it in `S-1-5-...`
