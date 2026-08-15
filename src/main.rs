@@ -665,21 +665,14 @@ fn default_key_path(filename: &str) -> Result<std::path::PathBuf> {
 /// code into production, and unlike Unix's permissive-by-default umask, a
 /// Windows user's profile directory (and everything newly created under it)
 /// already defaults to an owner-restricted ACL, so the residual risk from
-/// skipping that check is materially smaller than on Unix.
+/// skipping that check is materially smaller than on Unix. The parent
+/// directory is fsynced unconditionally before returning, whether this call
+/// created `dir` or found it already there -- see the comment at that call
+/// for why reuse can't skip it.
 fn ensure_owner_only_dir(dir: &std::path::Path) -> Result<()> {
     #[cfg(windows)]
     match windows_security::create_dir_owner_only(dir) {
-        // Syncing a file's data doesn't guarantee the directory entry
-        // pointing to it survives a crash (see `sync_parent_dir`'s doc
-        // comment) -- and the same is true one level up, for the directory
-        // entry `dir` itself just created inside its parent. Without this,
-        // a crash right after `generate-keys` reports success could leave
-        // the parent with no entry for `dir` at all on reboot, stranding
-        // whatever gets synced inside it afterward (the key files).
-        Ok(()) => {
-            return sync_parent_dir(&dir.to_string_lossy())
-                .context("Failed to sync directory containing the new key directory")
-        }
+        Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e).with_context(|| format!("Failed to create {}", dir.display())),
     }
@@ -687,16 +680,14 @@ fn ensure_owner_only_dir(dir: &std::path::Path) -> Result<()> {
     {
         use std::os::unix::fs::DirBuilderExt;
         match fs::DirBuilder::new().mode(0o700).create(dir) {
-            Ok(()) => {
-                return sync_parent_dir(&dir.to_string_lossy())
-                    .context("Failed to sync directory containing the new key directory")
-            }
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e).with_context(|| format!("Failed to create {}", dir.display())),
         }
     }
 
-    // Reuse path: dir already existed.
+    // Whether just created above or already present, verify it's actually a
+    // directory with the right permissions before trusting it.
     let meta = fs::metadata(dir).with_context(|| format!("Failed to inspect {}", dir.display()))?;
     if !meta.is_dir() {
         bail!("{} exists and is not a directory", dir.display());
@@ -714,7 +705,18 @@ fn ensure_owner_only_dir(dir: &std::path::Path) -> Result<()> {
             );
         }
     }
-    Ok(())
+
+    // Sync unconditionally, not just on the branch that just created `dir`:
+    // syncing a file's data doesn't guarantee the directory entry pointing
+    // to it survives a crash (see `sync_parent_dir`'s doc comment), and the
+    // same is true one level up for `dir` itself inside its parent. If an
+    // earlier call created `dir` but failed this exact sync (or crashed
+    // before ever attempting it), treating "already exists" as "already
+    // durable" would let a retry silently report success without ever
+    // making the directory entry crash-durable. Syncing here every time
+    // means a retry keeps trying until it actually succeeds.
+    sync_parent_dir(&dir.to_string_lossy())
+        .context("Failed to sync directory containing the key directory")
 }
 
 /// Create `path` for writing, failing if it already exists (O_CREAT|O_EXCL).
