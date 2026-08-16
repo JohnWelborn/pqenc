@@ -499,9 +499,7 @@ enum Commands {
         )]
         passphrase_file: Option<String>,
     },
-    #[command(
-        about = "Check an encrypted file for corruption (does not detect tampering)"
-    )]
+    #[command(about = "Check an encrypted file for corruption (does not detect tampering)")]
     Verify {
         #[arg(help = "Input file to verify (must be a regular file, not stdin or a pipe)")]
         input: String,
@@ -1988,7 +1986,13 @@ fn build_aad_v3(
     local_chunk_index: u64,
     header_hash: &[u8; 32],
 ) -> [u8; 50] {
-    build_aad(AAD_VERSION_V3, chunk_type, segment_index, local_chunk_index, header_hash)
+    build_aad(
+        AAD_VERSION_V3,
+        chunk_type,
+        segment_index,
+        local_chunk_index,
+        header_hash,
+    )
 }
 
 /// Splits a global (whole-file) chunk index into a `(segment_index,
@@ -2239,11 +2243,34 @@ fn sanitize_embedded_filename(raw: &str) -> Option<String> {
 #[cfg(windows)]
 fn filename_unsafe_on_windows(raw: &str) -> bool {
     const RESERVED_NAMES: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "COM\u{b9}", "COM\u{b2}", "COM\u{b3}", // COM¹ COM² COM³
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-        "LPT\u{b9}", "LPT\u{b2}", "LPT\u{b3}", // LPT¹ LPT² LPT³
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "COM\u{b9}",
+        "COM\u{b2}",
+        "COM\u{b3}", // COM¹ COM² COM³
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+        "LPT\u{b9}",
+        "LPT\u{b2}",
+        "LPT\u{b3}", // LPT¹ LPT² LPT³
     ];
 
     let has_reserved_char = raw.chars().any(|c| {
@@ -3716,8 +3743,7 @@ fn decrypt_file_with_segment_size(
         match parsed_format {
             FileFormat::V3 => {
                 let metadata_key = derive_metadata_key(&body_provider.combined_secret.data, &salt)?;
-                let metadata_cipher =
-                    Aes256Gcm::new(aes_key_from_slice(&metadata_key.data));
+                let metadata_cipher = Aes256Gcm::new(aes_key_from_slice(&metadata_key.data));
                 let metadata_aad = build_metadata_aad(&prefix_hash);
                 let mut metadata_plaintext = metadata_cipher
                     .decrypt(

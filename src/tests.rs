@@ -837,10 +837,7 @@ mod metadata_tests {
     #[test]
     fn test_resolve_encrypt_output_root_directory_fails_with_accurate_message() {
         let err = resolve_encrypt_output("/", None).unwrap_err().to_string();
-        assert!(
-            err.contains("filesystem root"),
-            "unexpected message: {err}"
-        );
+        assert!(err.contains("filesystem root"), "unexpected message: {err}");
         assert!(err.contains("--output"), "should suggest --output: {err}");
     }
 
@@ -1160,7 +1157,13 @@ fn build_test_pqe4_file(
         } else {
             AAD_CHUNK_TYPE_NORMAL
         };
-        let aad = build_aad(AAD_VERSION_V4, chunk_type, 0, chunk_index as u64, &header_hash);
+        let aad = build_aad(
+            AAD_VERSION_V4,
+            chunk_type,
+            0,
+            chunk_index as u64,
+            &header_hash,
+        );
         let nonce = get_nonce(&base_nonce, chunk_index as u64).unwrap();
         let chunk_ciphertext = cipher
             .encrypt(
@@ -2008,7 +2011,8 @@ mod format_tests {
             corrupted_priv_path.to_str().unwrap(),
             None,
         );
-        let err = result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
+        let err =
+            result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
         assert!(
             format!("{err:#}").contains("Invalid ML-KEM private key"),
             "unexpected error: {err:#}"
@@ -2024,11 +2028,9 @@ mod format_tests {
         let corrupted_priv_path =
             corrupt_private_key_hash(dir.path(), &priv_path, "fp_corrupted_priv.pem");
 
-        let result = show_fingerprint(
-            corrupted_priv_path.to_str().unwrap().to_string(),
-            None,
-        );
-        let err = result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
+        let result = show_fingerprint(corrupted_priv_path.to_str().unwrap().to_string(), None);
+        let err =
+            result.expect_err("a private key failing the FIPS 203 hash check must be rejected");
         assert!(
             format!("{err:#}").contains("Invalid ML-KEM private key"),
             "unexpected error: {err:#}"
@@ -2100,8 +2102,13 @@ mod format_tests {
         let priv_path = dir.path().join("priv.pem");
         fs::write(&priv_path, &priv_pem).unwrap();
 
-        decrypt_file(input_path.to_str().unwrap(), None, priv_path.to_str().unwrap(), None)
-            .unwrap();
+        decrypt_file(
+            input_path.to_str().unwrap(),
+            None,
+            priv_path.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
 
         let restored_path = dir.path().join("legacy_report.txt");
         assert!(
@@ -2463,8 +2470,20 @@ mod windows_filename_tests {
     #[test]
     fn test_sanitize_rejects_reserved_device_basenames() {
         for bad in [
-            "CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9",
-            "NUL.txt", "con.tar.gz", "Com3.log", "COM\u{b9}", "LPT\u{b2}",
+            "CON",
+            "con",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "COM9",
+            "LPT1",
+            "LPT9",
+            "NUL.txt",
+            "con.tar.gz",
+            "Com3.log",
+            "COM\u{b9}",
+            "LPT\u{b2}",
         ] {
             assert!(
                 sanitize_embedded_filename(bad).is_none(),
@@ -2500,7 +2519,12 @@ mod windows_filename_tests {
     fn test_sanitize_still_accepts_ordinary_names_on_windows() {
         // Regression guard: the new Windows-only checks must not reject
         // ordinary filenames a real `encrypt_file` run would embed.
-        for good in ["report.pdf", "my archive.tar.gz", "IMG_0001.JPG", "backup.tar.gz"] {
+        for good in [
+            "report.pdf",
+            "my archive.tar.gz",
+            "IMG_0001.JPG",
+            "backup.tar.gz",
+        ] {
             assert_eq!(sanitize_embedded_filename(good).as_deref(), Some(good));
         }
     }
