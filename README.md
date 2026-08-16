@@ -25,19 +25,19 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 **1. Generate a keypair, secure priv.key offline:**
 
 ```bash
-pqenc generate-keys -p pub.key -s priv.key
+pqenc generate-keys
 ```
 
 **2. Encrypt with the public key:**
 
 ```bash
-pqenc encrypt bank.txt -p pub.key -o secret.pqe
+pqenc encrypt secret.txt --output bank.pqe
 ```
 
 **3. Decrypt with the private key:**
 
 ```bash
-pqenc decrypt secret.pqe -s priv.key
+pqenc decrypt secret.pqe
 ```
 
 **Default key location:** `-p`/`-s` can be omitted. `generate-keys` then writes to `~/.pqenc/pub.key` and `~/.pqenc/priv.key` (creating that directory, owner-only, if needed), and `encrypt`/`decrypt`/`fingerprint` read from there when no key is given:
@@ -53,7 +53,7 @@ This is a convenience for single-machine use. For the offline-private-key workfl
 **Encrypting a directory (tar+gzip streamed internally, never written to disk):**
 
 ```bash
-pqenc encrypt mydir -p pub.key
+pqenc encrypt mydir --output secret.pqe
 ```
 
 ## Features
@@ -61,14 +61,13 @@ pqenc encrypt mydir -p pub.key
 - **ML-KEM-1024** (NIST FIPS 203) - Post-quantum key encapsulation mechanism
 - **X25519** - Hybrid classical key exchange for defense in depth
 - **AES-256-GCM** - Authenticated encryption with additional data
-- **Segmented rekeying (PQE4, also reads legacy PQE3)** - the current format `pqenc encrypt` writes divides plaintext into fixed 8 GiB segments, each independently keyed via HKDF-SHA256, so no single AES-256-GCM key ever encrypts more than 8 GiB regardless of total file size; `pqenc decrypt`/`pqenc verify` also still read files from the older PQE3 format
-- **Formally verified** - Uses libcrux, a formally verified cryptography library
+- **Formally verified ML-KEM-1024** - Uses libcrux, a formally verified cryptography library
 - **Pure Rust** - No C dependencies required
 - **Stdin support** - Encrypt piped data (e.g. tar archives) directly without writing plaintext to disk
-- **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup; if a hard kill or power loss interrupts before the rename, pqenc recognizes its own leftover reservation placeholder and safely reclaims it on the next attempt to the same path
+- **Atomic output** - Encryption streams to a temporary file and renames it into place, so an interrupted run never leaves a partial file that looks like a completed backup
 - **Key fingerprints & randomart** - `ssh-keygen`-style `SHA256:` fingerprints and ASCII-art visualization, shown at key generation and encryption time and available on demand via `pqenc fingerprint`, so a mismatched keypair can be caught by eye instead of only at restore time
-- **Metadata restoration** - the original filename, modification time, and access time are captured, encrypted, and authenticated at encrypt time, and restored automatically on decrypt when `--output` is omitted; restoration is best-effort and never fails the decrypt
-- **Corruption detection without the private key** - every encrypted file carries a SHA-256 checksum trailer over its own bytes, computed incrementally during encryption; `pqenc verify` recomputes and compares it, plus magic-byte/structural checks, with no key or passphrase, so it's safe to run unattended, e.g. in cron right after each backup. `pqenc decrypt` also runs this same check automatically, as a preflight before touching the private key, so a corrupted file is rejected with a clear error up front rather than partway through decryption. This is a plain checksum, not cryptographic authentication: it catches accidental corruption (bit rot, truncation, a bad copy), not deliberate tampering. Deliberate tampering is still caught by the AEAD tags at actual decrypt time
+- **Metadata restoration** - the original filename, modification time, and access time are captured, encrypted, and authenticated at encrypt time, and restored automatically on decrypt
+- **Corruption detection without the private key** - every encrypted file carries a SHA-256 checksum trailer, checked by `pqenc verify` and `pqenc decrypt`. It catches accidental corruption (bit rot, truncation, a bad copy), not tampering
 
 ## Typical Workflow
 
@@ -84,9 +83,6 @@ See [USAGE.md](USAGE.md) for the full walkthrough
 ### Build Commands
 
 ```bash
-# Debug build
-cargo build
-
 # Release build
 cargo build --release
 
