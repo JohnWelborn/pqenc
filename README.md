@@ -22,7 +22,7 @@ Using ML-KEM-1024 ensures that the encrypted data remains secure against future 
 
 ## Quick Start
 
-**1. Generate a keypair, secure priv.key offline:**
+**1. Generate a keypair, secure ~/.pqenc/priv.key offline:**
 
 ```bash
 pqenc generate-keys
@@ -31,26 +31,16 @@ pqenc generate-keys
 **2. Encrypt with the public key:**
 
 ```bash
-pqenc encrypt secret.txt --output bank.pqe
+pqenc encrypt secret.txt
 ```
 
 **3. Decrypt with the private key:**
 
 ```bash
-pqenc decrypt secret.pqe
+pqenc decrypt secret.txt.pqe
 ```
 
-**Default key location:** `-p`/`-s` can be omitted. `generate-keys` then writes to `~/.pqenc/pub.key` and `~/.pqenc/priv.key` (creating that directory, owner-only, if needed), and `encrypt`/`decrypt`/`fingerprint` read from there when no key is given:
-
-```bash
-pqenc generate-keys
-pqenc encrypt bank.txt -o secret.pqe
-pqenc decrypt secret.pqe
-```
-
-This is a convenience for single-machine use. For the offline-private-key workflow described above, move (or copy) `~/.pqenc/priv.key` to offline storage after generating it — the default location does not do that for you.
-
-**Encrypting a directory (tar+gzip streamed internally, never written to disk):**
+**Encrypting a directory:**
 
 ```bash
 pqenc encrypt mydir --output secret.pqe
